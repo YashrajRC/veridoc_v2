@@ -10,14 +10,16 @@ import re
 from pathlib import Path
 from typing import Optional
 
-import config
-import store
-from checklist import CHECKLIST, ChecklistItem, EvalMode
-from extraction import (DocumentExtraction, ExtractedField, doc_type_of,
-                        extract_documents, merge_extractions)
-from models import VerificationStatus, allowed_actions_for
-from policy import POLICY_RULES
-from reconciliation import RECON_RULES, ReconResult, parse_amount
+from hl_verifier import config
+from hl_verifier.storage import store
+from hl_verifier.checklist import CHECKLIST, ChecklistItem, EvalMode
+from hl_verifier.extraction import (DocumentExtraction, ExtractedField,
+                                    doc_type_of, extract_documents,
+                                    merge_extractions)
+from hl_verifier.models import VerificationStatus, allowed_actions_for
+from hl_verifier.rules.policy import POLICY_RULES
+from hl_verifier.rules.reconciliation import (RECON_RULES, ReconResult,
+                                              parse_amount)
 
 
 # --- Document discovery ------------------------------------------------------
@@ -104,6 +106,34 @@ def _rule_fi_office(de):
     if "negative" in str(ef.value).lower():
         return (VerificationStatus.EXCEPTION, f"Office FI: {ef.value}.", "high")
     return (VerificationStatus.VERIFIED, f"Office FI: {ef.value}.", ef.confidence)
+
+
+def _rule_kyc_verification(de):
+    """Surface the actual KYC verification results recorded in the RCU report
+    (Aadhaar / PAN / bank statement) rather than merely asserting the report
+    exists. Any explicit non-match is an exception; all-clear is verified; no
+    results found routes to a human."""
+    checks = [("aadhaar_result", "Aadhaar"), ("pan_result", "PAN"),
+              ("bank_statement_result", "Bank statement")]
+    parts, found, bad = [], False, False
+    for fname, label in checks:
+        ef = de.get(fname)
+        if ef.value is None:
+            continue
+        found = True
+        v = str(ef.value)
+        parts.append(f"{label}: {v}")
+        if any(w in v.lower() for w in ("not match", "mismatch", "negative", "fail",
+                                        "invalid", "not verified", "not found",
+                                        "discrep", "inoperative")):
+            bad = True
+    if not found:
+        return (VerificationStatus.MANUAL_REVIEW,
+                "KYC verification (Aadhaar/PAN/bank) not found in RCU; verify.", "low")
+    detail = "; ".join(parts)
+    if bad:
+        return (VerificationStatus.EXCEPTION, f"KYC verification flagged — {detail}.", "medium")
+    return (VerificationStatus.VERIFIED, f"KYC verified in RCU — {detail}.", "medium")
 
 
 def _rule_rcu_clear(de):
@@ -193,6 +223,7 @@ AUTO_DOC_RULES = {
     "fi_residence_positive": _rule_fi_residence,
     "fi_office_positive": _rule_fi_office,
     "rcu_clear": _rule_rcu_clear,
+    "kyc_verification": _rule_kyc_verification,
     "legal_title_clear": _rule_legal_title,
     "legal_no_encumbrance": _rule_legal_no_encumbrance,
     "technical_value_present": _rule_value_present,
@@ -351,6 +382,7 @@ _PRIMARY_FIELD = {
     "fi_residence_positive": "residence_verdict",
     "fi_office_positive": "office_verdict",
     "rcu_clear": "verdict",
+    "kyc_verification": "aadhaar_result",
     "legal_title_clear": "title_status",
     "legal_no_encumbrance": "encumbrances",
     "technical_value_present": "market_value",

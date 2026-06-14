@@ -17,9 +17,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-import config
-from extraction import DocumentExtraction, ExtractedField
-from models import VerificationStatus
+from hl_verifier import config
+from hl_verifier.extraction import DocumentExtraction, ExtractedField
+from hl_verifier.models import VerificationStatus
 
 
 @dataclass
@@ -50,11 +50,62 @@ def norm_name(value) -> Optional[str]:
     return " ".join(tokens)
 
 
+def name_tokens(value) -> set[str]:
+    n = norm_name(value)
+    return set(n.split()) if n else set()
+
+
+def split_parties(value) -> list[str]:
+    """A name field may carry several parties (applicant + co-applicant), joined
+    by 'and' / '&' / ','. Return them in order as normalised names. When there is
+    no separator the whole thing is one party (we still compare by token core, so
+    a run-together 'A B C D' is handled by the core logic, not here)."""
+    if value is None:
+        return []
+    parts = re.split(r"\s*(?:&|\band\b|,)\s*", str(value), flags=re.I)
+    out = []
+    for p in parts:
+        n = norm_name(p)
+        if n:
+            out.append(n)
+    return out
+
+
+def _token_matches(token: str, token_set: set[str], thr: float) -> bool:
+    """A token is present in a set if it matches exactly, as an initial (A ~
+    Anil), or fuzzily (OCR/spelling variants of the same word, e.g. HAQUE ~
+    HAQULL)."""
+    if token in token_set:
+        return True
+    if len(token) == 1:
+        return any(t.startswith(token) for t in token_set)
+    for t in token_set:
+        if len(t) == 1 and token.startswith(t):
+            return True
+        if abs(len(t) - len(token)) <= 2 and \
+                difflib.SequenceMatcher(None, token, t).ratio() >= thr:
+            return True
+    return False
+
+
+def core_coverage(doc_tokens: set[str], core: set[str], thr: float) -> float:
+    """Fraction of the shared 'core' name covered (fuzzily) by a document."""
+    if not core:
+        return 1.0
+    matched = sum(1 for c in core if _token_matches(c, doc_tokens, thr))
+    return matched / len(core)
+
+
 def names_match(a, b) -> bool:
-    na, nb = norm_name(a), norm_name(b)
-    if not na or not nb:
+    """Two name strings refer to the same person if one's tokens are (fuzzily)
+    covered by the other's — tolerant of honorifics, OCR noise and extra
+    co-applicant tokens, but still False for a genuinely different name."""
+    ta, tb = name_tokens(a), name_tokens(b)
+    if not ta or not tb:
         return False
-    return na == nb  # strict: any divergence is surfaced for human review
+    thr = getattr(config, "NAME_TOKEN_FUZZ", 0.82)
+    small, big = (ta, tb) if len(ta) <= len(tb) else (tb, ta)
+    return core_coverage(big, small, thr) >= getattr(config, "NAME_CORE_COVERAGE", 0.6)
 
 
 _AMOUNT_MULTIPLIERS = [
@@ -204,6 +255,15 @@ def norm_survey(value) -> Optional[str]:
     return s or None
 
 
+def survey_numbers(value) -> set[str]:
+    """The set of plot / survey / khasra numbers in a field, ignoring the words
+    around them ('Khasra No-', 'Part', 'Sy. No.'). So '613/49, 613/154 Part' and
+    '613/49, 613/154' both yield {'613/49', '613/154'} and reconcile."""
+    if value is None:
+        return set()
+    return set(re.findall(r"\d+(?:/\d+)?", str(value)))
+
+
 def _cell(ef: ExtractedField) -> dict:
     return {"value": ef.value,
             "display": "" if ef.value is None else str(ef.value),
@@ -243,89 +303,144 @@ def recon_borrower_name(item, ext: dict[str, DocumentExtraction]) -> ReconResult
             "Name found in fewer than two documents; verify manually.",
             confidence="low", values=values)
 
-    base_doc, base_val = present_names[0]
-    ref = norm_name(base_val) or str(base_val)
-    matched, diffs = [], []
-    for d, v in present_names[1:]:
-        if names_match(base_val, v):
-            matched.append(d)
-        else:
-            diffs.append((d, v, round(_name_similarity(base_val, v) * 100)))
+    # Establish the applicant "core": name tokens that recur across documents.
+    # The applicant's own name tokens appear in (nearly) every document; a
+    # co-applicant's appear in fewer. A document is consistent if it covers the
+    # core (fuzzily, so OCR/spelling variants of a name token still count); only
+    # a document sharing little of the core is flagged as a genuine difference.
+    n_docs = len(present_names)
+    per_doc_tokens: dict[str, set] = {}
+    token_doc_count: dict[str, int] = {}
+    for d, v in present_names:
+        toks = name_tokens(v)
+        per_doc_tokens[d] = toks
+        for t in toks:
+            token_doc_count[t] = token_doc_count.get(t, 0) + 1
+    # The applicant's tokens recur in (nearly) every document, so they have the
+    # highest doc-frequency; a co-applicant named in only some documents has a
+    # lower count. Take the most-frequent tokens (allowing one document of OCR
+    # drift) as the applicant core; the rest that still recur are co-applicants.
+    max_count = max(token_doc_count.values()) if token_doc_count else 0
+    core_min = max(2, max_count - 1)
+    core = {t for t, c in token_doc_count.items() if c >= core_min}
+    extra_tokens = sorted(t for t, c in token_doc_count.items()
+                          if c >= 2 and t not in core)
+
+    if not core:
+        return ReconResult(
+            VerificationStatus.MANUAL_REVIEW,
+            "Could not establish a consistent applicant name automatically; verify.",
+            confidence="low", values=values)
+
+    thr = getattr(config, "NAME_TOKEN_FUZZ", 0.82)
+    cov_floor = getattr(config, "NAME_CORE_COVERAGE", 0.6)
+    coverage = {d: core_coverage(per_doc_tokens[d], core, thr)
+                for d, _ in present_names}
+    diffs = [(d, v) for d, v in present_names if coverage[d] < cov_floor]
+    applicant = " ".join(sorted(core))
+    co_note = (f" Co-applicant name(s) also appear in some documents: "
+               f"{' / '.join(extra_tokens)}." if extra_tokens else "")
+    steps = [{"label": d, "value": f"{v}  ({round(coverage[d] * 100)}% of applicant name)"}
+             for d, v in present_names]
+
     if diffs:
         calc = {
-            "title": "Borrower / co-applicant name consistency",
-            "steps": [{"label": d, "value": f"{v}  (~{sim}% match to reference)"}
-                      for d, v, sim in diffs],
-            "result": (f"Reference “{ref}” (from {base_doc}); "
-                       f"{len(matched)} of {len(present_names) - 1} other "
-                       f"document(s) match."),
-            "verdict": ("Differs on: " + ", ".join(d for d, _, _ in diffs)
-                        + ". A high similarity is usually OCR noise on the same "
-                        "name; a low similarity may be a co-applicant or a "
-                        "genuine mismatch — confirm."),
+            "title": "Applicant name consistency",
+            "steps": steps,
+            "result": f"Applicant core: “{applicant}”.{co_note}",
+            "verdict": ("Differs materially on: " + ", ".join(d for d, _ in diffs)
+                        + " — these share little of the applicant name; confirm "
+                        "they are the same borrower (not a misfiled document)."),
             "references": [],
         }
         return ReconResult(
             VerificationStatus.EXCEPTION,
-            f"Borrower name differs across documents "
-            f"({', '.join(d for d, _, _ in diffs)} vs {base_doc}).",
+            f"Applicant name differs on {', '.join(d for d, _ in diffs)}; verify.",
             confidence="high", values=values, extra={"calculation": calc})
+
     calc = {
-        "title": "Borrower / co-applicant name consistency",
-        "steps": [],
-        "result": f"All {len(present_names)} document(s) reconcile to “{ref}”.",
-        "verdict": "Names consistent across the file.",
+        "title": "Applicant name consistency",
+        "steps": steps,
+        "result": (f"Applicant “{applicant}” reconciles across all {n_docs} "
+                   f"documents (honorific / OCR / spelling variants tolerated).{co_note}"),
+        "verdict": "Consistent — only minor spelling/honorific/OCR variation.",
         "references": [],
     }
     return ReconResult(
         VerificationStatus.VERIFIED,
-        f"Borrower name consistent across {len(present_names)} documents.",
+        f"Applicant name consistent across {n_docs} documents (variants tolerated).",
         confidence="high", values=values, extra={"calculation": calc})
 
 
 def recon_property_identity(item, ext) -> ReconResult:
     docs = [d for d in item.recon_docs if _present(ext, d)]
     values = {}
-    surveys, addresses = {}, {}
+    survey_sets, survey_cell, addresses = {}, {}, {}
     for d in docs:
         de = ext[d]
         sv = de.get("survey_or_plot_no")
         ad = de.get("property_address")
         values[d] = {"survey": _cell(sv), "address": _cell(ad)}
-        if sv.value is not None:
-            surveys[d] = norm_survey(sv.value)
+        nums = survey_numbers(sv.value)
+        if nums:
+            survey_sets[d] = nums
+            survey_cell[d] = sv
         if ad.value is not None:
-            addresses[d] = ad.value
+            addresses[d] = ad
 
-    # Strong signal: survey/plot numbers.
-    distinct_surveys = {v for v in surveys.values() if v}
-    if len(surveys) >= 2 and len(distinct_surveys) > 1:
+    # Strong signal: plot / survey / khasra numbers, compared as number sets so
+    # different surrounding wording does not cause a false mismatch.
+    if len(survey_sets) >= 2:
+        common = set.intersection(*survey_sets.values())
+        steps = [{"label": d, "value": ", ".join(sorted(s)),
+                  "doc": survey_cell[d].source or d, "page": survey_cell[d].page}
+                 for d, s in survey_sets.items()]
+        if common:
+            calc = {"title": "Property identity (survey / plot no.)", "steps": steps,
+                    "result": f"Shared plot/survey number(s): {', '.join(sorted(common))}.",
+                    "verdict": "Same property — survey/plot numbers reconcile.",
+                    "references": []}
+            return ReconResult(VerificationStatus.VERIFIED,
+                               "Survey/plot number matches across documents.",
+                               confidence="high", values=values,
+                               extra={"calculation": calc})
+        calc = {"title": "Property identity (survey / plot no.)", "steps": steps,
+                "result": "No plot/survey number is common to all documents.",
+                "verdict": "Survey/plot numbers differ — confirm this is one property.",
+                "references": []}
         return ReconResult(VerificationStatus.EXCEPTION,
                            "Survey/plot number differs across documents.",
-                           confidence="high", values=values)
-    if len(surveys) >= 2 and len(distinct_surveys) == 1:
-        return ReconResult(VerificationStatus.VERIFIED,
-                           "Survey/plot number matches across documents.",
-                           confidence="high", values=values)
+                           confidence="high", values=values,
+                           extra={"calculation": calc})
 
-    # Fall back to address token overlap.
+    # Fall back to address word overlap (lenient: only a very low overlap, with
+    # no survey number to lean on, is treated as a material difference).
     addr_docs = list(addresses.items())
     if len(addr_docs) >= 2:
+        floor = getattr(config, "ADDRESS_SIM_FLOOR", 0.30)
         lowest = 1.0
         for i in range(len(addr_docs)):
             for j in range(i + 1, len(addr_docs)):
-                sim = address_similarity(addr_docs[i][1], addr_docs[j][1])
+                sim = address_similarity(addr_docs[i][1].value, addr_docs[j][1].value)
                 if sim is not None:
                     lowest = min(lowest, sim)
-        if lowest < 0.6:
+        steps = [{"label": d, "value": str(ef.value)[:90],
+                  "doc": ef.source or d, "page": ef.page} for d, ef in addr_docs]
+        calc = {"title": "Property identity (address)", "steps": steps,
+                "result": f"Lowest address word-overlap between documents: {round(lowest * 100)}%.",
+                "verdict": ("Addresses differ materially; confirm this is one property."
+                            if lowest < floor else
+                            "Addresses broadly consistent; no survey number to confirm against."),
+                "references": []}
+        if lowest < floor:
             return ReconResult(
                 VerificationStatus.EXCEPTION,
                 "Property address differs materially across documents; verify.",
-                confidence="low", values=values)
+                confidence="low", values=values, extra={"calculation": calc})
         return ReconResult(
             VerificationStatus.VERIFIED,
             "Property address broadly consistent (heuristic); confirm survey no.",
-            confidence="low", values=values)
+            confidence="low", values=values, extra={"calculation": calc})
 
     return ReconResult(VerificationStatus.MANUAL_REVIEW,
                        "Insufficient property data to reconcile; verify manually.",

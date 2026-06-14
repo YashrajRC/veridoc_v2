@@ -7,34 +7,62 @@ Vertex AI Workbench instance. No extra Python packages required beyond what
 Workbench provides plus FastAPI/uvicorn; the front-end is one dependency-free
 HTML file.
 
-> Status: complete (engine, API, and review console). Nothing here has been
-> executed — it has been written and hand-reviewed only, per request. A syntax
-> pass (`python -m compileall .`) before first run is advisable.
+> Status: complete (engine, API, and review console). A syntax pass
+> (`python -m compileall hl_verifier`) before first run is advisable.
+
+**Docs:** [finance.md](finance.md) explains *what* each check means for a zero-finance
+reader; [logic.md](logic.md) traces *how* the code decides; [improvement.md](improvement.md)
+lists in-scope upgrades; [agentic_ai.md](agentic_ai.md) teaches agentic AI and the
+Phase-2 framework options.
+
+**In this build:** beyond presence/sign-off/reconciliation, the tool now also
+(1) checks **interest rate and fees against the lender's published pricing grid**
+(section P) and shows the **calculation + the quoted policy clause** as proof;
+(2) reads the **KYC verification results (Aadhaar / PAN / bank statement) out of the
+RCU report** rather than just noting the report exists (A6); (3) matches **names and
+property identity tolerantly** — OCR/honorific/initial variants and co-applicants no
+longer trip a false mismatch, while a genuinely different name/plot still does; and
+(4) uses **keyword-first hybrid search** (exact word matches lead; semantic fills in).
+All tunable numbers live in [hl_verifier/config.py](hl_verifier/config.py).
 
 ## File structure
 
-```
-hl_verifier/
-  config.py          settings: paths, Vertex/Gemini ids, document keys + aliases, thresholds
-  models.py          status enum, reviewer actions, adaptive action map, decision record
-  checklist.py       the A–J checklist + reconciliation items, each tagged with how it is evaluated
-  extraction.py      google-genai calls (extract + transcribe + embed), caching, retry/timeout
-  reconciliation.py  cross-document rules + Indian-format name/amount/address normalisation
-  evaluate.py        composes checklist + extractions + reconciliation + decisions -> evaluated case
-  store.py           SQLite append-only decision/audit store
-  vectorstore.py     SQLite + numpy vector store (embedded passages, cosine search)
-  indexing.py        transcribe -> chunk -> embed -> store; semantic search over a case
-  app.py             FastAPI routes (list, evaluate, serve PDF, decisions, upload, index, search)
-  warm.py            one-off script: pre-extract + pre-index every case before a demo
-  static/
-    index.html       the review console (HTML/CSS/JS, no build step, no external deps)
-  README.md          this file
+The code is a Python package, `hl_verifier/`, grouped by responsibility. Two thin
+shims at the project root keep the Workbench run commands unchanged.
 
-  # created at runtime:
-  cache/             extracted JSON + plain-text transcripts per document, keyed by file hash
-  review.db          SQLite decisions/audit
-  vectors.db         SQLite vector store (embedded passages for search)
-  data/              YOUR input — see "Adding a case"
+```
+app.py                     thin entrypoint -> hl_verifier.api.app:app   (so `uvicorn app:app` still works)
+warm.py                    thin entrypoint -> hl_verifier.warm          (so `python warm.py` still works)
+
+hl_verifier/
+  config.py                settings: paths, Vertex/Gemini ids, document keys + aliases, and ALL tunable thresholds
+  models.py                status enum, reviewer actions, adaptive action map, decision record
+  checklist.py             the A–J + P (policy) + R (reconciliation) checklist, each tagged with how it is evaluated
+  extraction.py            google-genai calls (extract + transcribe + classify + embed), caching, retry/timeout
+  rules/
+    reconciliation.py      cross-document rules + Indian name / amount(+in words) / address matching + calculation blocks
+    policy.py              pricing-grid checks (interest rate, fees) vs the L&T grid, with calculation + quoted proof
+  pipeline/
+    evaluate.py            discovery + per-document rules (incl. KYC); composes checklist + extractions + rules + decisions
+    indexing.py            transcribe -> chunk -> embed -> store; KEYWORD-FIRST hybrid search over a case
+  storage/
+    store.py               SQLite append-only decision/audit store
+    vectorstore.py         SQLite + numpy vector store (embedded passages, cosine search)
+  api/
+    app.py                 FastAPI routes (list, evaluate, serve PDF, decisions, upload, classify, index, search)
+  web/
+    index.html             the review console (HTML/CSS/JS, no build step, no external deps)
+  warm.py                  pre-extract + pre-index every case before a demo (resumable)
+
+# docs at the project root:
+README.md  finance.md  logic.md  improvement.md  agentic_ai.md
+Policy/                    the lender's pricing grid PDF (input to policy.py)
+
+# created at runtime (at the PROJECT ROOT, not inside the package):
+cache/                     extracted JSON + plain-text transcripts per document, keyed by file hash
+review.db                  SQLite decisions/audit
+vectors.db                 SQLite vector store (embedded passages for search)
+data/                      YOUR input — see "Adding a case"
 ```
 
 ## What you MUST confirm before running
@@ -45,7 +73,7 @@ failure. Set them as environment variables or edit `config.py`:
 - `GCP_PROJECT` — your project id (often inferred on Workbench, but read
   explicitly here so failures are loud).
 - `GCP_LOCATION` — defaults to `us-central1`.
-- `GEMINI_MODEL` — defaults to `gemini-2.0-flash-001`. Confirm the exact model
+- `GEMINI_MODEL` — defaults to `gemini-2.5-flash`. Confirm the exact model
   enabled in your project.
 - `HL_EMBED_MODEL` — defaults to `text-embedding-005`, used for the search
   index. Confirm it is enabled in your project.
@@ -93,12 +121,12 @@ per type behaves exactly as before.
 
 ## Run
 
-```bash
-cd hl_verifier
+Run from the **project root** (the folder containing `app.py` and `hl_verifier/`):
 
+```bash
 # (optional but recommended) catch syntax errors first — this only compiles,
 # it does not start anything or call Gemini:
-python -m compileall .
+python -m compileall hl_verifier
 
 # 1. (once, before a demo) populate the extraction cache so the live run is instant.
 #    This is the step that actually calls Gemini.

@@ -15,7 +15,7 @@ import threading
 
 import numpy as np
 
-import config
+from hl_verifier import config
 
 _LOCK = threading.Lock()
 

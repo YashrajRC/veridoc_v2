@@ -10,6 +10,34 @@ Legend — effort: 🟢 small (hours) · 🟡 medium (a day or two) · 🔴 larg
 
 ---
 
+## Already shipped (since this list was written)
+
+These items from below are now **done** and live in the code:
+
+- **#5 Amounts‑in‑words parser** — `parse_amount` now reads "One Crore Four Lakh …"
+  so LTV/valuation compute instead of falling to manual review.
+- **#6 Editable policy thresholds** — LTV review cap, login‑fee cap and the fuzzy
+  matching tolerances live in `hl_verifier/config.py`; the full pricing **grid** is
+  in `hl_verifier/rules/policy.py`.
+- **#7 Stronger name/address matching** — applicant‑core + fuzzy/initials/co‑applicant
+  handling (R1) and survey‑number‑set matching (R2); tolerances configurable.
+- **#16 "Explain this verdict"** — every reconciliation/policy line renders a
+  **calculation block** (steps → formula → verdict → quoted policy clause), each
+  figure linked to its page.
+- **Policy checks (new section P)** — interest‑rate and fee compliance against the
+  L&T pricing grid, with calculation + proof.
+- **KYC from RCU (A6)** — reads the Aadhaar/PAN/bank verification results, not just
+  "report present."
+- **Search** — rebuilt as keyword‑first hybrid (exact matches lead; semantic recall
+  underneath; works even without embeddings).
+- **Modular package + teaching doc** — code reorganised under `hl_verifier/`; the
+  agentic‑framework options are taught and weighed in [agentic_ai.md](agentic_ai.md)
+  for a Phase‑2 decision.
+
+The remaining items below are still open. (Code paths now live under `hl_verifier/`.)
+
+---
+
 ## A. Extraction quality (the biggest lever)
 
 1. **Bounding‑box evidence → real in‑document highlighting.** 🟡

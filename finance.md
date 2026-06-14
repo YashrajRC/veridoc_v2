@@ -91,8 +91,14 @@ text; the structure and checks are what matter.)
 - **A4 — RCU screening clear** · *RCU report* · The fraud‑unit verdict must be
   clear. If it reads "negative" or "refer," that's an **Exception** (possible
   fraud); otherwise **Verified**.
-- **A5 — CIBIL on file** / **A6 — KYC on file** · *not supplied here* · These
-  resolve to **Document missing** — an honest "not provided," not a failure.
+- **A5 — CIBIL on file** · *not supplied here* · resolves to **Document missing** —
+  an honest "not provided," not a failure.
+- **A6 — KYC verified in RCU** · *RCU report* · The KYC checks (Aadhaar, PAN, bank
+  statement) are actually performed *inside* the fraud‑unit (RCU) report, so the
+  tool reads their **results** and reports each one — e.g. "Aadhaar: matched /
+  operative; PAN: valid." If any explicitly says *not matched / inoperative /
+  failed* → **Exception**; all clear → **Verified**; none found → **Manual review**.
+  (This is stronger than just confirming a KYC document exists.)
 
 ### B. Legal & title — *does the borrower really own a clean property?*
 - **B1 — Title clear & marketable** · *Legal report* · The lawyer's **title
@@ -157,17 +163,45 @@ text; the structure and checks are what matter.)
 - **J1 — Deviations approved at correct authority** · *system* → **Pending system
   data**.
 
+### P. Policy / pricing compliance — *do the sanctioned terms obey the bank's grid?*
+The bank publishes a **pricing grid** (the L&T HL & LAP grid in the `Policy/`
+folder): what interest rate and fees are allowed for a given loan size and credit
+band. These checks compare the **sanction letter** against that grid and **show the
+arithmetic and the quoted policy clause** as proof — so the reviewer sees the
+reasoning, not just a colour.
+
+- **P1 — Interest rate within the grid** · *sanction letter* · The tool reads the
+  sanctioned rate, works out the loan‑amount band (e.g. ₹0–50 lakh), and shows the
+  **published window** for that band (Salaried vs Self‑Employed) plus the absolute
+  floor (7.75%, below which only senior management may approve). If the rate is
+  **below the floor** → **Exception** (needs a documented deviation approval); if it
+  sits inside the window → **Verified** (confirm the exact CIBIL band); if it is
+  above the standard grid → **Manual review** (maybe a special product). It also
+  prints the whole grid for that band so the reviewer can pin the exact cell.
+- **P2 — Fees within policy** · *sanction letter* · Checks the **processing fee**
+  (HL Salaried ₹10,000 + GST, Self‑Employed 0.50%, LAP 1%) and the **login fee**
+  (cap ₹1,000). Outside policy → **Exception** with the offending number; within →
+  **Verified**.
+
 ### R. Cross‑document reconciliation — *does the same fact agree everywhere?*
 This is the cleverest part. The same fact appears on many documents; if they
-**disagree**, that's a red flag (a possible mix‑up or fraud).
+**disagree**, that's a red flag (a possible mix‑up or fraud). Importantly, the tool
+does **not** demand the values be *character‑for‑character identical* — scanned
+Indian documents legitimately vary (Mr/Dr, OCR slips, co‑applicants, "Khasra No‑"
+prefixes). It tolerates those variants and flags only a **genuine** difference.
 
-- **R1 — Borrower name consistent** · across *up to 10 documents* · The tool
-  normalises names (drops Mr/Mrs, "S/o", punctuation) and compares. All the same →
-  **Verified**; any document differs → **Exception** naming which ones.
-- **R2 — Property identity consistent** · *technical, legal, insurance* · It
-  prefers the **survey/plot number** (a strong, exact ID); if those differ →
-  **Exception**. If only addresses are available, it compares word‑overlap and
-  flags a big mismatch.
+- **R1 — Borrower name consistent** · across *up to 10 documents* · The tool finds
+  the **applicant's core name** (the name tokens that recur across the file),
+  tolerating honorifics, **OCR noise** ("Haque" ≈ "Haqull"), **initials** ("A." ≈
+  "Anil") and word order, and it **separates co‑applicants** (it tells you a second
+  name is present rather than calling it a mismatch). All documents share the core
+  name → **Verified**; a document that shares *little* of the core → **Exception**
+  (could be a wrong file). It shows each document's % match as proof.
+- **R2 — Property identity consistent** · *technical, legal, insurance* · It prefers
+  the **survey/plot number**, compared as a **set of numbers** so "Khasra No‑613/49,
+  613/154 Part" and "613/49, 613/154" correctly reconcile. A shared plot number →
+  **Verified**; none in common → **Exception**. If only addresses exist, it compares
+  word‑overlap and flags only a *very* low overlap.
 - **R3 — Sanctioned amount = disbursement request** · *sanction vs DRL* · The
   amount the bank approved must equal the amount the borrower asked to release.
   Equal → **Verified**; different → **Exception**.

@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-import config
+from hl_verifier import config
 
 # --- SDK import is guarded so the rest of the app works without live Gemini ---
 GEMINI_AVAILABLE = False
@@ -105,6 +105,9 @@ DOC_FIELDS: dict[str, dict[str, str]] = {
     "rcu": {
         "applicant_name": "name of the applicant screened",
         "verdict": "the RCU verdict (e.g. positive / negative / refer)",
+        "aadhaar_result": "result of Aadhaar/UIDAI verification if present (e.g. matched / verified / operative / seeded), as written",
+        "pan_result": "result of PAN verification if present (e.g. valid / matched / operative), as written",
+        "bank_statement_result": "result of bank statement / bank account verification if present, as written",
         "remarks": "any adverse remark, else state none",
     },
     "fi": {

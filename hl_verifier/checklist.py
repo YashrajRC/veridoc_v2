@@ -60,8 +60,8 @@ CHECKLIST: list[ChecklistItem] = [
                   EvalMode.AUTO_DOC, source_doc="rcu", rule="rcu_clear"),
     ChecklistItem("A5", "A. Applicant", "CIBIL / bureau report on file",  # not supplied
                   EvalMode.AUTO_DOC, source_doc="cibil", rule="present"),
-    ChecklistItem("A6", "A. Applicant", "KYC documents on file",          # not supplied
-                  EvalMode.AUTO_DOC, source_doc="kyc", rule="present"),
+    ChecklistItem("A6", "A. Applicant", "KYC verified in RCU (Aadhaar / PAN / bank statement)",
+                  EvalMode.AUTO_DOC, source_doc="rcu", rule="kyc_verification"),
 
     # --- B. Legal & title ----------------------------------------------------
     ChecklistItem("B1", "B. Legal", "Title reported clear and marketable",

@@ -141,6 +141,11 @@
   .calc-refs ul{margin:2px 0 0; padding-left:16px}
   .calc-refs li{margin:1px 0}
   mark{background:#fbf0bd; color:inherit; padding:0 1px; border-radius:2px}
+  .mtag{font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.03em;
+    padding:1px 6px; border-radius:9px; border:1px solid}
+  .mtag.exact{color:var(--ok-ink); background:var(--ok-bg); border-color:var(--ok-bd)}
+  .mtag.partial{color:var(--warn-ink); background:var(--warn-bg); border-color:var(--warn-bd)}
+  .mtag.related{color:var(--pend-ink); background:var(--pend-bg); border-color:var(--pend-bd)}
 
   /* ---- OTC/PDD readiness ---- */
   .meter{height:8px; border:1px solid var(--border); border-radius:6px; overflow:hidden;
@@ -554,11 +559,15 @@ function searchResultsHtml(){
     ? '<div class="faint" style="margin-bottom:6px">Keyword matches (semantic index unavailable).</div>'
     : "";
   if(rs.length === 0) return note + '<div class="muted">No matches.</div>';
+  const MK = { exact:"exact match", partial:"partial match", related:"related" };
   return note + rs.map(r => {
     const link = r.page ? srcLink(r.doc_key, r.page, r.doc_key + " p." + r.page)
                         : '<span class="mono">' + esc(r.doc_key) + "</span>";
-    return '<div class="sr"><div class="srhead">' + link
-      + ' <span class="faint num">score ' + esc(r.score) + "</span></div>"
+    const tag = r.match
+      ? '<span class="mtag ' + esc(r.match) + '">' + esc(MK[r.match] || r.match) + "</span>"
+      : "";
+    return '<div class="sr"><div class="srhead">' + link + tag
+      + ' <span class="faint num">' + esc(r.score) + "</span></div>"
       + '<div class="srtext">' + highlightTerms(r.text, state.searchQuery) + "</div></div>";
   }).join("");
 }

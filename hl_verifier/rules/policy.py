@@ -19,9 +19,10 @@ from __future__ import annotations
 
 from typing import Optional
 
-import config
-from models import VerificationStatus
-from reconciliation import ReconResult, _cell, fmt_inr, parse_amount
+from hl_verifier import config
+from hl_verifier.models import VerificationStatus
+from hl_verifier.rules.reconciliation import (ReconResult, _cell, fmt_inr,
+                                              parse_amount)
 
 # ---------------------------------------------------------------------------
 # Loan-amount slabs (rupees). The grid columns are these four bands.

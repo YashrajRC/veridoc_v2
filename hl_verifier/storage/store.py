@@ -12,8 +12,8 @@ import sqlite3
 import threading
 from typing import Optional
 
-import config
-from models import Decision
+from hl_verifier import config
+from hl_verifier.models import Decision
 
 _WRITE_LOCK = threading.Lock()
 

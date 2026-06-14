@@ -10,7 +10,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
+# The package lives in hl_verifier/; runtime artifacts (data, cache, the SQLite
+# stores) live at the PROJECT ROOT (the package's parent), so moving the code
+# into a package did NOT relocate your existing cases/cache. The bundled web
+# console ships inside the package. All paths remain environment-overridable.
+PACKAGE_DIR = Path(__file__).resolve().parent
+BASE_DIR = PACKAGE_DIR.parent
+WEB_DIR = PACKAGE_DIR / "web"
 
 # --- On-disk layout ----------------------------------------------------------
 # Expected: DATA_DIR/<case_id>/<document>.pdf
@@ -112,3 +118,20 @@ TITLE_VETTING_THRESHOLD = 5_00_00_000  # 5 crore
 LTV_REVIEW_CAP = float(os.environ.get("HL_LTV_REVIEW_CAP", "0.90"))
 # Login fee cap per the pricing notes (Rs. 1000 for HL & LAP; waiver with ZSM).
 LOGIN_FEE_CAP = float(os.environ.get("HL_LOGIN_FEE_CAP", "1000"))
+
+# --- Fuzzy matching tolerances ----------------------------------------------
+# Names and addresses on scanned Indian documents legitimately vary (honorifics,
+# OCR noise, co-applicant ordering, "Khasra No-" prefixes). These tolerances let
+# the reconciliation rules treat genuine variants of the SAME name/property as a
+# match while still flagging a genuinely different one. Raise toward 1.0 for
+# stricter matching, lower for more tolerance.
+#
+# NAME_TOKEN_FUZZ:    similarity (0-1) at which two name tokens are "the same"
+#                     (e.g. HAQUE vs HAQULL ~0.83 -> same word).
+# NAME_CORE_COVERAGE: fraction of the shared "core" applicant name a document
+#                     must cover to be consistent; below it the name is flagged.
+# ADDRESS_SIM_FLOOR:  address token-overlap below which (with no survey match)
+#                     the property is flagged as materially different.
+NAME_TOKEN_FUZZ = float(os.environ.get("HL_NAME_TOKEN_FUZZ", "0.82"))
+NAME_CORE_COVERAGE = float(os.environ.get("HL_NAME_CORE_COVERAGE", "0.6"))
+ADDRESS_SIM_FLOOR = float(os.environ.get("HL_ADDRESS_SIM_FLOOR", "0.30"))

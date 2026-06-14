@@ -13,10 +13,10 @@ import asyncio
 import difflib
 import re
 
-import config
-import extraction
-import vectorstore
-from evaluate import discover_documents
+from hl_verifier import config
+from hl_verifier import extraction
+from hl_verifier.storage import vectorstore
+from hl_verifier.pipeline.evaluate import discover_documents
 
 
 def _parse_pages(text: str) -> list[tuple[int, str]]:
@@ -117,10 +117,10 @@ def _tokenize(s: str) -> list[str]:
 
 
 def _lexical_score(q_tokens: list[str], q_str: str, text: str) -> float:
-    """Score one passage against the query: 1.0 per exact token, 0.6 for a
-    substring/prefix hit, a partial credit for a close fuzzy match (handles OCR
-    and typos like 'aadhar'/'aahaar'), plus a phrase bonus for a full-string hit.
-    Normalised to roughly [0, ~1.5]."""
+    """Score one passage against the query: 1.0 per exact word, 0.6 for a
+    substring/prefix hit, partial credit for a close fuzzy match (handles OCR and
+    typos like 'aadhar'/'aahaar'), plus a phrase bonus when the full query string
+    appears. Higher is a better keyword match; 0 means no keyword overlap."""
     if not q_tokens:
         return 0.0
     t_low = text.lower()
@@ -136,15 +136,16 @@ def _lexical_score(q_tokens: list[str], q_str: str, text: str) -> float:
                 (qt in tt or tt in qt) for tt in t_tokens if abs(len(tt) - len(qt)) <= 3):
             score += 0.6
             continue
-        best = 0.0
-        for tt in t_tokens:
-            if abs(len(tt) - len(qt)) > 2:
-                continue
-            r = difflib.SequenceMatcher(None, qt, tt).ratio()
-            if r > best:
-                best = r
-        if best >= 0.78:
-            score += 0.5 * best
+        if len(qt) >= 4:  # fuzzy only for longer tokens, to avoid noise
+            best = 0.0
+            for tt in t_tokens:
+                if abs(len(tt) - len(qt)) > 2:
+                    continue
+                r = difflib.SequenceMatcher(None, qt, tt).ratio()
+                if r > best:
+                    best = r
+            if best >= 0.82:
+                score += 0.5 * best
     base = score / len(q_tokens)
     if len(q_str.strip()) >= 4 and q_str.strip().lower() in t_low:
         base += 0.5
@@ -156,58 +157,55 @@ def _key(d: dict) -> tuple:
 
 
 async def search(case_id: str, query: str, k: int = 8) -> dict:
+    """Keyword-first hybrid search. Passages that actually contain the query
+    words are returned FIRST, best keyword match on top (semantic score only
+    breaks ties); semantic-only matches follow underneath for recall on
+    paraphrase. This guarantees exact word matches lead, while still surfacing
+    related passages. Falls back to keyword-only when embeddings are unavailable."""
     n = vectorstore.count(case_id)
     passages = vectorstore.all_passages(case_id)
     if not passages:
         return {"results": [], "indexed": n}
 
     q_tokens = _tokenize(query)
-    pool = max(25, k * 3)
+    pool = max(30, k * 4)
 
-    # Lexical half (always available).
-    lex = []
+    # Keyword scores for every passage.
+    lex_by_key: dict[tuple, tuple] = {}
     for p in passages:
         sc = _lexical_score(q_tokens, query, p.get("text", ""))
         if sc > 0:
-            lex.append((sc, p))
-    lex.sort(key=lambda x: -x[0])
-    lex_top = lex[:pool]
+            lex_by_key[_key(p)] = (sc, p)
 
-    cand: dict[tuple, dict] = {}
-    for sc, p in lex_top:
-        cand[_key(p)] = {"meta": p, "lex": sc, "sem": 0.0}
-
-    # Semantic half (best-effort; absent if embeddings are unavailable).
+    # Semantic scores (best-effort; empty if embeddings are unavailable).
     qv = await asyncio.to_thread(extraction.embed_texts, [query])
     sem_avail = bool(qv)
+    sem_by_key: dict[tuple, tuple] = {}
     if sem_avail:
         for r in vectorstore.search(case_id, qv[0], k=pool):
-            key = _key(r)
-            if key in cand:
-                cand[key]["sem"] = r.get("score", 0.0)
-            else:
-                cand[key] = {"meta": r, "lex": 0.0, "sem": r.get("score", 0.0)}
+            sem_by_key[_key(r)] = (r.get("score", 0.0), r)
 
-    if not cand:
-        return {"results": [], "indexed": n,
-                **({} if sem_avail else {"mode": "keyword"})}
+    def row(meta, score, kind):
+        return {"doc_key": meta.get("doc_key", ""), "page": meta.get("page"),
+                "text": meta.get("text", ""), "item_id": meta.get("item_id", ""),
+                "status": meta.get("status", ""), "score": round(float(score), 4),
+                "match": kind}
 
-    lex_max = max((c["lex"] for c in cand.values()), default=0.0) or 1.0
-    sem_max = max((c["sem"] for c in cand.values()), default=0.0)
+    # Tier 1 — keyword hits, best keyword score first (semantic breaks ties).
+    tier1 = [(sc, sem_by_key.get(key, (0.0, None))[0], p)
+             for key, (sc, p) in lex_by_key.items()]
+    tier1.sort(key=lambda x: (-x[0], -x[1]))
+    results = [row(p, sc, "exact" if sc >= 1.0 else "partial")
+               for sc, _, p in tier1]
 
-    results = []
-    for c in cand.values():
-        ln = c["lex"] / lex_max
-        sn = (max(0.0, c["sem"]) / sem_max) if (sem_avail and sem_max > 0) else 0.0
-        final = (0.55 * ln + 0.45 * sn) if sem_avail else ln
-        m = c["meta"]
-        results.append({
-            "doc_key": m.get("doc_key", ""), "page": m.get("page"),
-            "text": m.get("text", ""), "item_id": m.get("item_id", ""),
-            "status": m.get("status", ""), "score": round(final, 4),
-        })
-    results.sort(key=lambda x: -x["score"])
+    # Tier 2 — semantic-only matches (no keyword overlap) for recall.
+    if sem_avail:
+        sem_only = [(score, r) for key, (score, r) in sem_by_key.items()
+                    if key not in lex_by_key and score > 0]
+        sem_only.sort(key=lambda x: -x[0])
+        results += [row(r, score, "related") for score, r in sem_only]
+
     out = {"results": results[:max(1, k)], "indexed": n}
     if not sem_avail:
-        out["mode"] = "keyword"  # embeddings unavailable -> lexical-only
+        out["mode"] = "keyword"
     return out
