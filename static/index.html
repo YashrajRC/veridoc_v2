@@ -269,7 +269,19 @@ function apiUrl(path){
   return base + String(path).replace(/^\//, "");
 }
 
+// Jupyter / jupyter-server-proxy guards POST/PUT/DELETE with an XSRF token, even
+// for a proxied app; without it the proxy answers "403 '_xsrf' argument missing
+// from POST". The token sits in the (non-HttpOnly) _xsrf cookie — echo it back as
+// a header so our POSTs (classify, upload, decisions) are accepted. Harmless when
+// running directly (no cookie -> no header).
+function xsrfHeader(){
+  const m = document.cookie.match(/(?:^|;\s*)_xsrf=([^;]+)/);
+  return m ? { "X-XSRFToken": decodeURIComponent(m[1]) } : {};
+}
+
 async function fetchJSON(url, opts){
+  opts = Object.assign({}, opts);
+  opts.headers = Object.assign({}, opts.headers, xsrfHeader());
   const r = await fetch(apiUrl(url), opts);
   const txt = await r.text();
   let body = null;
@@ -458,7 +470,7 @@ async function startUpload(){
       const fd = new FormData();
       fd.append("file", e.file, e.file.name);
       const r = await fetch(apiUrl("/api/cases/" + enc(cid) + "/files/" + enc(e.docKey)),
-        { method:"POST", body: fd });
+        { method:"POST", body: fd, headers: xsrfHeader() });
       if(!r.ok){
         let t = await r.text();
         try{ const j = JSON.parse(t); t = j.detail || t; }catch{}

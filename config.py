@@ -24,11 +24,11 @@ VEC_DB_PATH = Path(os.environ.get("HL_VEC_DB_PATH", str(BASE_DIR / "vectors.db")
 # often inferred from the environment, but we read it explicitly so failures are
 # loud rather than silent.
 GCP_PROJECT = os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT")
-GCP_LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
+GCP_LOCATION = os.environ.get("GCP_LOCATION")
 # Generation + embedding model ids. Confirm both are enabled in your project
 # (`gcloud ai models list`, or the Vertex Model Garden / console). Override via
 # env if these names differ for you.
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-001")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 EMBED_MODEL = os.environ.get("HL_EMBED_MODEL", "text-embedding-005")
 
 # Bound parallel Gemini calls so we don't trip quota during the fan-out.
