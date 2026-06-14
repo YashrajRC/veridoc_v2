@@ -14,6 +14,7 @@ handlers here do not 500 on a Gemini outage.
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 import uuid
 from pathlib import Path
@@ -25,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import config
+import extraction
 import indexing
 import store
 import vectorstore
@@ -131,7 +133,17 @@ async def upload_document(case_id: str, doc_key: str, file: UploadFile = File(..
     if data[:1024].find(b"%PDF") == -1:
         raise HTTPException(status_code=400, detail="file does not look like a PDF")
     case_dir = (config.DATA_DIR / case_id).resolve()
-    dest = (case_dir / (doc_key + ".pdf")).resolve()
+    # A case may legitimately hold several documents of the same type (e.g. a main
+    # and a supplementary loan agreement). Give each a unique on-disk name so none
+    # overwrites another: first "<type>.pdf", then "<type>__2.pdf", "__3", ...
+    if not (case_dir / (doc_key + ".pdf")).exists():
+        doc_id = doc_key
+    else:
+        n = 2
+        while (case_dir / f"{doc_key}__{n}.pdf").exists():
+            n += 1
+        doc_id = f"{doc_key}__{n}"
+    dest = (case_dir / (doc_id + ".pdf")).resolve()
     try:
         contained = dest.is_relative_to(case_dir)
     except AttributeError:
@@ -139,7 +151,33 @@ async def upload_document(case_id: str, doc_key: str, file: UploadFile = File(..
     if not contained:
         raise HTTPException(status_code=400, detail="invalid destination path")
     dest.write_bytes(data)
-    return {"doc_key": doc_key, "size": len(data), "filename": file.filename}
+    return {"doc_key": doc_key, "doc_id": doc_id, "size": len(data),
+            "filename": file.filename}
+
+
+@app.post("/api/classify")
+async def classify_document(file: UploadFile = File(...)):
+    """Auto-detect a document's type from its content so the upload UI can
+    pre-fill it for the reviewer to confirm/override. Stateless: the bytes are
+    classified and discarded here; the file is committed later via the
+    /files/{doc_key} endpoint under the (possibly corrected) type."""
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty upload")
+    if len(data) > config.INLINE_MAX_BYTES:
+        raise HTTPException(status_code=413,
+                            detail="file exceeds inline extraction size limit")
+    if data[:1024].find(b"%PDF") == -1:
+        raise HTTPException(status_code=400, detail="file does not look like a PDF")
+    result = await asyncio.to_thread(extraction.classify_pdf_sync, data)
+    key = result.get("doc_key", "unknown")
+    return {
+        "filename": file.filename,
+        "doc_key": key,
+        "label": config.DOC_LABELS.get(key, key),
+        "confidence": result.get("confidence", "low"),
+        "reason": result.get("reason", ""),
+    }
 
 
 @app.get("/api/cases/{case_id}")

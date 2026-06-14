@@ -139,6 +139,11 @@ class ExtractedField:
     page: Optional[int] = None
     snippet: str = ""
     confidence: str = "low"
+    # The id of the physical document this value was read from. For a type with a
+    # single document this equals the type; for multiple (e.g. main + supplementary
+    # loan agreement) it pinpoints which file, so the evidence link opens the right
+    # PDF. Set per-placement after extraction, never cached (cache is by content).
+    source: Optional[str] = None
 
     @staticmethod
     def from_obj(obj: Any) -> "ExtractedField":
@@ -280,6 +285,46 @@ def transcribe_sync(pdf_bytes: bytes) -> str:
     return _gen([part, prompt], json_mode=False)
 
 
+def classify_pdf_sync(pdf_bytes: bytes) -> dict:
+    """Ask Gemini what kind of loan document this is.
+
+    Returns {"doc_key", "confidence", "reason"} where doc_key is one of
+    config.DOC_KEYS or "unknown". This is the auto-detection step that lets the
+    upload flow pre-fill a document type for the reviewer to confirm/override; it
+    does not touch the downstream verification logic. Never raises — any failure
+    degrades to {"unknown", "low", <reason>} so the reviewer simply chooses by
+    hand."""
+    if not GEMINI_AVAILABLE:
+        return {"doc_key": "unknown", "confidence": "low",
+                "reason": _GEMINI_INIT_ERROR or "Gemini unavailable"}
+    catalog = "\n".join(f"- {k}: {config.DOC_LABELS.get(k, k)}"
+                        for k in config.DOC_KEYS)
+    prompt = (
+        "You are classifying a single document from an Indian home-loan file. "
+        "From its content (title, headings, fields, stamps) decide which ONE of "
+        "these document types it is:\n" + catalog + "\n\n"
+        "Respond ONLY as JSON: {\"doc_key\": <one key from the list above, or "
+        "\"unknown\" if it matches none>, \"confidence\": \"high\"|\"medium\"|"
+        "\"low\", \"reason\": <short phrase citing what you saw>}. If you are not "
+        "sure, use \"unknown\" with low confidence rather than guessing."
+    )
+    part = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
+    try:
+        raw = _gen([part, prompt], json_mode=True)
+        obj = _coerce_json(raw) or {}
+    except Exception as exc:
+        return {"doc_key": "unknown", "confidence": "low",
+                "reason": f"{type(exc).__name__}: {exc}"}
+    key = str(obj.get("doc_key", "unknown")).strip()
+    if key not in config.DOC_KEYS:
+        key = "unknown"
+    conf = str(obj.get("confidence", "low")).strip().lower()
+    if conf not in ("high", "medium", "low"):
+        conf = "low"
+    return {"doc_key": key, "confidence": conf,
+            "reason": str(obj.get("reason", ""))[:200]}
+
+
 def embed_texts(texts: list[str]) -> Optional[list[list[float]]]:
     """Embed a list of texts. Returns one vector per input, or None on failure
     or when Gemini is unavailable."""
@@ -326,35 +371,51 @@ def _write_cache(file_hash: str, de: DocumentExtraction) -> None:
         pass  # caching is best-effort; never fail the extraction over it
 
 
-async def extract_document(doc_key: str, pdf_path: Path,
+def doc_type_of(doc_id: str) -> str:
+    """The canonical type of a physical document id. Ids are '<type>' for the
+    first document of a type and '<type>__N' for the rest, so the type is the
+    part before the first '__'."""
+    return doc_id.split("__", 1)[0]
+
+
+def _tag_source(de: DocumentExtraction, doc_id: str) -> DocumentExtraction:
+    """Stamp every field with the physical document it came from. Done after
+    cache read/write so the cache stays keyed purely by file content."""
+    for ef in de.fields.values():
+        ef.source = doc_id
+    return de
+
+
+async def extract_document(doc_id: str, doc_type: str, pdf_path: Path,
                            sem: asyncio.Semaphore,
                            use_cache: bool = True) -> DocumentExtraction:
-    """Extract one document. Always returns a DocumentExtraction; failures are
-    captured in .ok/.error rather than raised."""
+    """Extract one physical document. `doc_type` selects the field spec/prompt;
+    `doc_id` is recorded as the source of every field. Always returns a
+    DocumentExtraction; failures are captured in .ok/.error rather than raised."""
     try:
         pdf_bytes = pdf_path.read_bytes()
     except Exception as exc:
-        return DocumentExtraction(doc_key, ok=False,
+        return DocumentExtraction(doc_type, ok=False,
                                   error=f"cannot read file: {exc}")
     if not pdf_bytes:
-        return DocumentExtraction(doc_key, ok=False, error="empty file")
+        return DocumentExtraction(doc_type, ok=False, error="empty file")
     if len(pdf_bytes) > config.INLINE_MAX_BYTES:
         return DocumentExtraction(
-            doc_key, ok=False,
+            doc_type, ok=False,
             error=("file exceeds inline size limit; GCS staging not implemented"))
 
     file_hash = hashlib.sha256(pdf_bytes).hexdigest()
     if use_cache:
-        cached = _read_cache(file_hash, doc_key)
+        cached = _read_cache(file_hash, doc_type)
         if cached is not None:
-            return cached
+            return _tag_source(cached, doc_id)
 
     if not GEMINI_AVAILABLE:
         return DocumentExtraction(
-            doc_key, ok=False,
+            doc_type, ok=False,
             error=f"Gemini unavailable ({_GEMINI_INIT_ERROR})")
 
-    prompt = _build_prompt(doc_key)
+    prompt = _build_prompt(doc_type)
     last_err = "unknown error"
     async with sem:
         for attempt in range(config.GEMINI_MAX_RETRIES + 1):
@@ -367,10 +428,10 @@ async def extract_document(doc_key: str, pdf_path: Path,
                 if obj is None:
                     last_err = "model did not return parseable JSON"
                 else:
-                    de = DocumentExtraction(doc_key,
-                                            fields=_parse_extraction(doc_key, obj))
+                    de = DocumentExtraction(doc_type,
+                                            fields=_parse_extraction(doc_type, obj))
                     _write_cache(file_hash, de)
-                    return de
+                    return _tag_source(de, doc_id)
             except asyncio.TimeoutError:
                 last_err = f"timeout after {config.GEMINI_TIMEOUT_S}s"
             except Exception as exc:
@@ -378,18 +439,59 @@ async def extract_document(doc_key: str, pdf_path: Path,
             if attempt < config.GEMINI_MAX_RETRIES:
                 await asyncio.sleep(1.5 * (attempt + 1))
 
-    return DocumentExtraction(doc_key, ok=False, error=last_err)
+    return DocumentExtraction(doc_type, ok=False, error=last_err)
 
 
-async def extract_documents(docs: dict[str, Path],
+async def extract_documents(id_to_path: dict[str, Path],
                             use_cache: bool = True) -> dict[str, DocumentExtraction]:
-    """Concurrently extract a mapping of doc_key -> path."""
+    """Concurrently extract a mapping of doc_id -> path. Returns one
+    DocumentExtraction per physical document, keyed by doc_id (the type is
+    derived from the id). Callers merge these per type via merge_extractions."""
     sem = asyncio.Semaphore(config.MAX_CONCURRENCY)
-    items = list(docs.items())
+    items = list(id_to_path.items())
     results = await asyncio.gather(
-        *[extract_document(k, p, sem, use_cache) for k, p in items]
+        *[extract_document(doc_id, doc_type_of(doc_id), p, sem, use_cache)
+          for doc_id, p in items]
     )
-    return {k: r for (k, _), r in zip(items, results)}
+    return {doc_id: r for (doc_id, _), r in zip(items, results)}
+
+
+_CONF_RANK = {"high": 3, "medium": 2, "low": 1}
+
+
+def merge_extractions(doc_type: str,
+                      parts: list[DocumentExtraction]) -> DocumentExtraction:
+    """Combine all physical documents of one type into a single extraction the
+    rest of the pipeline can consume unchanged.
+
+    For each field, take the best non-null value across the documents (highest
+    confidence wins; ties keep the first), preserving its source doc_id, page and
+    snippet. A field is therefore 'found' if ANY document of the type supplies it
+    (e.g. a value present only on a supplementary loan agreement is used). With a
+    single document this returns exactly that document's fields."""
+    oks = [p for p in parts if p.ok]
+    merged = DocumentExtraction(doc_key=doc_type, ok=bool(oks))
+    spec_names = list(DOC_FIELDS.get(doc_type, {}).keys())
+    if not oks:
+        merged.error = ("; ".join(p.error for p in parts if p.error)
+                        or "no readable document")
+        for name in spec_names:
+            merged.fields[name] = ExtractedField(source=parts[0].doc_key if parts else doc_type)
+        return merged
+    # Single document: pass its fields straight through (identical to old path).
+    if len(oks) == 1:
+        merged.fields = dict(oks[0].fields)
+        return merged
+    for name in spec_names:
+        best: Optional[ExtractedField] = None
+        for p in oks:
+            ef = p.get(name)
+            if ef.value is None:
+                continue
+            if best is None or _CONF_RANK.get(ef.confidence, 0) > _CONF_RANK.get(best.confidence, 0):
+                best = ef
+        merged.fields[name] = best if best is not None else ExtractedField()
+    return merged
 
 
 def _transcript_cache_path(file_hash: str) -> Path:

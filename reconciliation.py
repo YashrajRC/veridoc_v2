@@ -125,7 +125,8 @@ def norm_survey(value) -> Optional[str]:
 def _cell(ef: ExtractedField) -> dict:
     return {"value": ef.value,
             "display": "" if ef.value is None else str(ef.value),
-            "page": ef.page, "snippet": ef.snippet}
+            "page": ef.page, "snippet": ef.snippet,
+            "doc_id": ef.source}   # which physical PDF this value came from
 
 
 def _present(ext: dict[str, DocumentExtraction], doc_key: str) -> bool:

@@ -259,8 +259,18 @@ function setStatus(msg, isErr){
 }
 function showError(msg){ setStatus(msg, true); }
 
+// On Vertex AI Workbench the app is served behind the Jupyter proxy under a path
+// prefix (e.g. /proxy/8080/). An absolute URL like "/api/..." would bypass that
+// prefix and hit the Jupyter server itself, which rejects POSTs with
+// "403 '_xsrf' argument missing". Resolve API paths relative to the folder this
+// page is served from so requests reach our app whether proxied or direct.
+function apiUrl(path){
+  const base = location.pathname.replace(/[^/]*$/, "");  // page dir, ends with "/"
+  return base + String(path).replace(/^\//, "");
+}
+
 async function fetchJSON(url, opts){
-  const r = await fetch(url, opts);
+  const r = await fetch(apiUrl(url), opts);
   const txt = await r.text();
   let body = null;
   try { body = txt ? JSON.parse(txt) : null; } catch { body = txt; }
@@ -338,10 +348,10 @@ function renderUpload(){
   closeDoc();
   $("main").innerHTML =
     '<section class="panel"><h2>New case &middot; upload documents</h2><div class="body">'
-    + '<p class="muted">Add the PDF documents for this loan file. Scanned PDFs are '
-    + "expected. Assign a document type to each file, then start verification. "
-    + "Files left unassigned are skipped; types you do not upload will show as "
-    + "missing on the checklist.</p>"
+    + '<p class="muted">Add the PDF documents for this loan file (scanned PDFs are '
+    + "expected). Each file's type is detected automatically — confirm or "
+    + "correct it before starting. Files left unassigned are skipped; types you do "
+    + "not upload will show as missing on the checklist.</p>"
     + '<input id="fileInput" type="file" accept="application/pdf,.pdf" multiple>'
     + '<div id="fileRows" style="margin-top:11px"></div>'
     + '<div class="actions" style="margin-top:13px">'
@@ -361,6 +371,7 @@ function renderUpload(){
 function onFilesChosen(){
   state.uploadFiles = Array.from(($("fileInput").files) || []);
   state.assign = {};
+  state.userTouched = {};   // rows the reviewer has manually set (don't auto-override)
   const opts = docTypeOptions();
   const rows = state.uploadFiles.map((f, i) => {
     const g = guessType(f.name); state.assign[i] = g;
@@ -373,6 +384,7 @@ function onFilesChosen(){
       + '<span class="chip">' + esc(f.name) + "</span>"
       + '<span class="muted num">' + sizeMb + " MB</span>" + big + notpdf
       + '<span style="flex:1"></span>'
+      + '<span class="muted cls" data-cls="' + i + '"></span>'
       + '<select data-fidx="' + i + '"><option value="">Unassigned</option>' + opts + "</select>"
       + "</div>";
   }).join("");
@@ -381,11 +393,45 @@ function onFilesChosen(){
     const sel = document.querySelector('select[data-fidx="' + i + '"]');
     if(sel){ sel.value = state.assign[i] || "";
       sel.addEventListener("change", e => {
-        state.assign[+e.target.getAttribute("data-fidx")] = e.target.value;
+        const idx = +e.target.getAttribute("data-fidx");
+        state.assign[idx] = e.target.value;
+        state.userTouched[idx] = true;   // reviewer chose: stop auto-detect overriding it
         updateStartBtn();
       }); }
   });
   updateStartBtn();
+  autoClassifyAll();
+}
+
+// ---- auto-classification (detect each file's type for the reviewer to confirm) ----
+function setRowDetected(i, msg, isWarn){
+  const el = document.querySelector('span.cls[data-cls="' + i + '"]');
+  if(el){ el.textContent = msg || ""; el.classList.toggle("lowconf", !!isWarn); }
+}
+async function classifyOne(i, f){
+  setRowDetected(i, "detecting type…", false);
+  try{
+    const fd = new FormData();
+    fd.append("file", f, f.name);
+    const r = await fetchJSON("/api/classify", { method:"POST", body: fd });
+    if(state.userTouched[i]) return;            // reviewer already chose: respect it
+    if(r && r.doc_key && r.doc_key !== "unknown"){
+      state.assign[i] = r.doc_key;
+      const sel = document.querySelector('select[data-fidx="' + i + '"]');
+      if(sel) sel.value = r.doc_key;
+      setRowDetected(i, "detected: " + (r.label || r.doc_key)
+        + " (" + (r.confidence || "") + ") — confirm or change",
+        r.confidence === "low");
+    } else {
+      setRowDetected(i, "could not auto-detect — please choose", true);
+    }
+  }catch(e){
+    setRowDetected(i, "auto-detect unavailable — choose manually", true);
+  }
+  updateStartBtn();
+}
+function autoClassifyAll(){
+  (state.uploadFiles || []).forEach((f, i) => { classifyOne(i, f); });
 }
 function updateStartBtn(){
   const btn = $("startUpload");
@@ -398,13 +444,8 @@ async function startUpload(){
     if(k) entries.push({ file: state.uploadFiles[i], docKey: k });
   });
   if(entries.length === 0) return;
-  const keys = entries.map(e => e.docKey);
-  const dup = keys.find((k, idx) => keys.indexOf(k) !== idx);
-  if(dup){
-    $("uploadMsg").innerHTML = '<span style="color:var(--ex-ink)">Each document type '
-      + "can be assigned to one file only. Duplicate: " + esc(dup) + "</span>";
-    return;
-  }
+  // Multiple documents of the same type are allowed (e.g. a main + supplementary
+  // loan agreement); the server stores each under a distinct id.
   $("startUpload").disabled = true; $("cancelUpload").disabled = true;
   try{
     $("uploadMsg").textContent = "Creating case…";
@@ -416,7 +457,7 @@ async function startUpload(){
         + " of " + entries.length + ")…";
       const fd = new FormData();
       fd.append("file", e.file, e.file.name);
-      const r = await fetch("/api/cases/" + enc(cid) + "/files/" + enc(e.docKey),
+      const r = await fetch(apiUrl("/api/cases/" + enc(cid) + "/files/" + enc(e.docKey)),
         { method:"POST", body: fd });
       if(!r.ok){
         let t = await r.text();
@@ -550,7 +591,7 @@ function cellVal(doc, cell){
   const v = (cell.display !== undefined) ? cell.display
           : (cell.value !== undefined ? cell.value : "");
   const disp = (v === null || v === "") ? '<span class="muted">&mdash;</span>' : esc(String(v));
-  const link = cell.page ? " " + srcLink(doc, cell.page, "p." + cell.page) : "";
+  const link = cell.page ? " " + srcLink(cell.doc_id || doc, cell.page, "p." + cell.page) : "";
   return disp + link;
 }
 function reconValuesTable(extra){
@@ -667,7 +708,11 @@ function render(){
     + '<div class="counts" style="margin-top:9px">' + counts + "</div>";
 
   // documents panel
-  const present = (d.documents_present || []).map(x => '<span class="chip">' + esc(x) + "</span>").join("");
+  const docCounts = d.documents || {};
+  const present = (d.documents_present || []).map(x => {
+    const n = (docCounts[x] || []).length;
+    return '<span class="chip">' + esc(x) + (n > 1 ? " (" + n + ")" : "") + "</span>";
+  }).join("");
   const missing = (d.documents_missing || []).map(x => '<span class="chip miss">' + esc(x) + "</span>").join("");
   const unknown = (d.documents_unrecognised || []).map(x => '<span class="chip unk">' + esc(x) + "</span>").join("");
   const errs = d.extraction_errors || {};
@@ -777,7 +822,7 @@ async function bulkAccept(){
 // ---- evidence drawer ----
 function openDoc(docKey, page){
   if(!state.caseId || !docKey) return;
-  let url = "/api/cases/" + enc(state.caseId) + "/document/" + enc(docKey);
+  let url = apiUrl("/api/cases/" + enc(state.caseId) + "/document/" + enc(docKey));
   if(page) url += "#page=" + page;
   $("pdfFrame").src = url;
   $("drawerTitle").textContent = docKey + (page ? " — page " + page : "");

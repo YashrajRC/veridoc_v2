@@ -13,7 +13,8 @@ from typing import Optional
 import config
 import store
 from checklist import CHECKLIST, ChecklistItem, EvalMode
-from extraction import DocumentExtraction, ExtractedField, extract_documents
+from extraction import (DocumentExtraction, ExtractedField, doc_type_of,
+                        extract_documents, merge_extractions)
 from models import VerificationStatus, allowed_actions_for
 from reconciliation import RECON_RULES, ReconResult, parse_amount
 
@@ -29,21 +30,42 @@ def _canonical_key(stem: str) -> Optional[str]:
 
 
 def discover_documents(case_id: str) -> tuple[dict[str, Path], list[str]]:
-    """Return (present doc_key -> path, list of unrecognised filenames)."""
+    """Return (doc_id -> path, list of unrecognised filenames).
+
+    A case may hold several documents of the same type (e.g. a main and a
+    supplementary loan agreement). Each physical PDF gets a stable doc_id: the
+    first document of a type is the bare type ("loan_agreement"), the rest are
+    suffixed ("loan_agreement__2", ...). The type is recovered from the id via
+    doc_type_of. A single-document type therefore yields {type: path} exactly as
+    before, so all single-doc behaviour is unchanged."""
     case_dir = config.DATA_DIR / case_id
-    present: dict[str, Path] = {}
+    by_type: dict[str, list[Path]] = {}
     unknown: list[str] = []
     if not case_dir.is_dir():
-        return present, unknown
+        return {}, unknown
     for p in sorted(case_dir.iterdir()):
         if not p.is_file() or p.suffix.lower() != ".pdf":
             continue
-        key = _canonical_key(p.stem)
+        base = p.stem.split("__", 1)[0]   # drop our "__N" instance suffix, if any
+        key = _canonical_key(base)
         if key is None:
             unknown.append(p.name)
-        elif key not in present:  # first match wins; ignore duplicates
-            present[key] = p
-    return present, unknown
+        else:
+            by_type.setdefault(key, []).append(p)
+    id_to_path: dict[str, Path] = {}
+    for key, paths in by_type.items():
+        for i, path in enumerate(sorted(paths)):
+            doc_id = key if i == 0 else f"{key}__{i + 1}"
+            id_to_path[doc_id] = path
+    return id_to_path, unknown
+
+
+def group_ids_by_type(id_to_path: dict[str, Path]) -> dict[str, list[str]]:
+    """Group physical doc_ids by their canonical type, preserving order."""
+    out: dict[str, list[str]] = {}
+    for doc_id in id_to_path:
+        out.setdefault(doc_type_of(doc_id), []).append(doc_id)
+    return out
 
 
 def list_cases() -> list[str]:
@@ -205,9 +227,10 @@ SIGNOFF_FIELDS = {
 
 
 def _evidence_from_field(doc_key: str, ef: ExtractedField) -> list[dict]:
+    src = ef.source or doc_key   # point at the physical PDF the value came from
     if ef.page is None and not ef.snippet:
-        return [{"doc_key": doc_key, "page": None, "snippet": ""}]
-    return [{"doc_key": doc_key, "page": ef.page, "snippet": ef.snippet}]
+        return [{"doc_key": src, "page": None, "snippet": ""}]
+    return [{"doc_key": src, "page": ef.page, "snippet": ef.snippet}]
 
 
 def _evidence_from_recon(values: dict[str, dict]) -> list[dict]:
@@ -215,12 +238,14 @@ def _evidence_from_recon(values: dict[str, dict]) -> list[dict]:
     for doc_key, cell in values.items():
         # property identity nests survey/address; flatten to first with a page
         if "page" in cell:
-            out.append({"doc_key": doc_key, "page": cell.get("page"),
+            out.append({"doc_key": cell.get("doc_id") or doc_key,
+                        "page": cell.get("page"),
                         "snippet": cell.get("snippet", ""),
                         "value": cell.get("display", "")})
         else:
             for sub in cell.values():
-                out.append({"doc_key": doc_key, "page": sub.get("page"),
+                out.append({"doc_key": sub.get("doc_id") or doc_key,
+                            "page": sub.get("page"),
                             "snippet": sub.get("snippet", ""),
                             "value": sub.get("display", "")})
                 break
@@ -275,7 +300,7 @@ def _evaluate_item(item: ChecklistItem, ext: dict[str, DocumentExtraction],
                 detected = _truthy(ef)
                 parts.append(f"{label}: {'detected' if detected else 'not detected'}")
                 if ef.page is not None or ef.snippet:
-                    evidence.append({"doc_key": item.source_doc,
+                    evidence.append({"doc_key": ef.source or item.source_doc,
                                      "page": ef.page, "snippet": ef.snippet})
             status = VerificationStatus.NEEDS_SIGNOFF
             finding = "; ".join(parts) + " -- confirm authenticity."
@@ -373,8 +398,13 @@ def _pack(item: ChecklistItem, status, finding, confidence, evidence, extra) -> 
 
 
 async def evaluate_case(case_id: str, use_cache: bool = True) -> dict:
-    docs, unknown = discover_documents(case_id)
-    ext = await extract_documents(docs, use_cache=use_cache) if docs else {}
+    id_to_path, unknown = discover_documents(case_id)
+    raw = await extract_documents(id_to_path, use_cache=use_cache) if id_to_path else {}
+    type_to_ids = group_ids_by_type(id_to_path)
+    # Collapse all physical documents of a type into one extraction the checklist
+    # and reconciliation consume unchanged.
+    ext = {t: merge_extractions(t, [raw[i] for i in ids])
+           for t, ids in type_to_ids.items()}
     attrs = derive_attributes(ext)
 
     items = [_evaluate_item(it, ext, attrs) for it in CHECKLIST]
@@ -395,10 +425,12 @@ async def evaluate_case(case_id: str, use_cache: bool = True) -> dict:
 
     return {
         "case_id": case_id,
-        "documents_present": sorted(docs.keys()),
+        "documents_present": sorted(type_to_ids.keys()),
+        # type -> [doc_id, ...] so the UI can show "loan agreement (2)" etc.
+        "documents": {t: type_to_ids[t] for t in sorted(type_to_ids)},
         "documents_unrecognised": unknown,
-        "documents_missing": [k for k in config.DOC_KEYS if k not in docs],
-        "extraction_errors": {k: v.error for k, v in ext.items() if not v.ok},
+        "documents_missing": [k for k in config.DOC_KEYS if k not in type_to_ids],
+        "extraction_errors": {i: r.error for i, r in raw.items() if not r.ok},
         "items": items,
         "summary": {
             "total": len(items),

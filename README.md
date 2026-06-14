@@ -57,12 +57,13 @@ failure. Set them as environment variables or edit `config.py`:
 
 Two ways:
 
-1. **Upload in the UI (primary).** Click "New case", add the PDF documents,
-   assign a document type to each (a guess is pre-filled from the filename), and
-   start verification. Files are uploaded as multipart form data (one request
-   per file, using `python-multipart`) and stored as `<doc_key>.pdf` under a
-   generated case folder. Types you do not upload show as missing on the
-   checklist.
+1. **Upload in the UI (primary).** Click "New case" and add the PDF documents.
+   Each file's document type is **detected automatically** (Gemini classifies the
+   content via `POST /api/classify`); the detected type is pre-selected for you to
+   confirm or correct before starting — you are never required to know the type up
+   front. Files are then uploaded as multipart form data (one request per file,
+   using `python-multipart`) and stored as `<doc_key>.pdf` under a generated case
+   folder. Types you do not upload show as missing on the checklist.
 
 2. **Pre-place folders.** Drop files under `DATA_DIR/<case_id>/`:
 
@@ -79,6 +80,16 @@ Filenames are matched to document types via `config.FILENAME_ALIASES`
 (case-insensitive, punctuation ignored). Files that don't match are reported as
 "unrecognised" rather than guessed at. Document types referenced by the
 checklist but not present resolve to `document_missing`.
+
+**Multiple documents of the same type.** A case can hold more than one document
+of a type (e.g. a main *and* a supplementary loan agreement). The UI lets you
+upload several files of the same type; on disk the first is `<type>.pdf` and the
+rest are `<type>__2.pdf`, `<type>__3.pdf`, … (use the same `__N` convention when
+pre-placing). Each physical document is classified, extracted and OCR-indexed
+separately, then **merged per type** for the checklist: a field is taken as found
+if *any* document of that type supplies it (highest-confidence value wins), and
+each value's evidence link opens the specific PDF it came from. A single document
+per type behaves exactly as before.
 
 ## Run
 
