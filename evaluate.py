@@ -16,6 +16,7 @@ from checklist import CHECKLIST, ChecklistItem, EvalMode
 from extraction import (DocumentExtraction, ExtractedField, doc_type_of,
                         extract_documents, merge_extractions)
 from models import VerificationStatus, allowed_actions_for
+from policy import POLICY_RULES
 from reconciliation import RECON_RULES, ReconResult, parse_amount
 
 
@@ -329,11 +330,12 @@ def _evaluate_item(item: ChecklistItem, ext: dict[str, DocumentExtraction],
                 if primary:
                     evidence = _evidence_from_field(item.source_doc, de.get(primary))
 
-    elif mode == EvalMode.AUTO_RECON:
-        fn = RECON_RULES.get(item.rule)
+    elif mode in (EvalMode.AUTO_RECON, EvalMode.AUTO_POLICY):
+        rules = POLICY_RULES if mode == EvalMode.AUTO_POLICY else RECON_RULES
+        fn = rules.get(item.rule)
         if fn is None:
             status = VerificationStatus.MANUAL_REVIEW
-            finding = f"No reconciliation rule for '{item.rule}'."
+            finding = f"No rule implemented for '{item.rule}'."
             confidence = "low"
         else:
             res: ReconResult = fn(item, ext)

@@ -99,3 +99,16 @@ FILENAME_ALIASES = {
 # Loan ticket-size threshold (in rupees) above which the title search requires
 # senior/empanelled vetting per the checklist (B-section, >= 5 Cr).
 TITLE_VETTING_THRESHOLD = 5_00_00_000  # 5 crore
+
+# --- Editable policy thresholds ---------------------------------------------
+# Credit-policy numbers that the deterministic rules compare against. Kept here
+# (not hard-coded in the rules) so they can be tuned per product without code
+# changes. The pricing GRID itself (ROI/PF bands by CIBIL & slab) lives in
+# policy.py; these are the single-number triggers.
+#
+# The HL pricing grid publishes no single LTV cap (the product LTV norm, COP vs
+# market value, is applied in LOS), so LTV is flagged against a review trigger
+# rather than a hard cap. LAP special pricing in the policy requires LTV <= 70%.
+LTV_REVIEW_CAP = float(os.environ.get("HL_LTV_REVIEW_CAP", "0.90"))
+# Login fee cap per the pricing notes (Rs. 1000 for HL & LAP; waiver with ZSM).
+LOGIN_FEE_CAP = float(os.environ.get("HL_LOGIN_FEE_CAP", "1000"))

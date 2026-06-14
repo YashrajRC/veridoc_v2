@@ -38,3 +38,6 @@ vectors.db        # SQLite vector store
 .idea/
 .DS_Store
 Thumbs.db
+
+Policy/
+screenshot/

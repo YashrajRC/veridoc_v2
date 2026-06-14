@@ -10,6 +10,7 @@ and simply yields an empty (or partial) search index.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import re
 
 import config
@@ -101,9 +102,112 @@ async def build_index(case_id: str, force: bool = False) -> dict:
     return {"indexed": n, "skipped": False, "errors": errors}
 
 
+# ---------------------------------------------------------------------------
+# Hybrid search: lexical (exact/partial/fuzzy term overlap on the raw text) +
+# semantic (embedding cosine). Pure semantic search alone misses exact terms
+# (names, numbers, "Aadhaar") and is thrown by typos; lexical alone misses
+# paraphrase. Blending the two — and falling back to lexical when embeddings are
+# unavailable — is markedly better on a loan file and needs no extra services.
+# ---------------------------------------------------------------------------
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _tokenize(s: str) -> list[str]:
+    return _TOKEN_RE.findall(str(s).lower())
+
+
+def _lexical_score(q_tokens: list[str], q_str: str, text: str) -> float:
+    """Score one passage against the query: 1.0 per exact token, 0.6 for a
+    substring/prefix hit, a partial credit for a close fuzzy match (handles OCR
+    and typos like 'aadhar'/'aahaar'), plus a phrase bonus for a full-string hit.
+    Normalised to roughly [0, ~1.5]."""
+    if not q_tokens:
+        return 0.0
+    t_low = text.lower()
+    t_tokens = set(_tokenize(text))
+    if not t_tokens:
+        return 0.0
+    score = 0.0
+    for qt in q_tokens:
+        if qt in t_tokens:
+            score += 1.0
+            continue
+        if len(qt) >= 3 and any(
+                (qt in tt or tt in qt) for tt in t_tokens if abs(len(tt) - len(qt)) <= 3):
+            score += 0.6
+            continue
+        best = 0.0
+        for tt in t_tokens:
+            if abs(len(tt) - len(qt)) > 2:
+                continue
+            r = difflib.SequenceMatcher(None, qt, tt).ratio()
+            if r > best:
+                best = r
+        if best >= 0.78:
+            score += 0.5 * best
+    base = score / len(q_tokens)
+    if len(q_str.strip()) >= 4 and q_str.strip().lower() in t_low:
+        base += 0.5
+    return base
+
+
+def _key(d: dict) -> tuple:
+    return (d.get("doc_key"), d.get("page"), d.get("text", "")[:80])
+
+
 async def search(case_id: str, query: str, k: int = 8) -> dict:
     n = vectorstore.count(case_id)
+    passages = vectorstore.all_passages(case_id)
+    if not passages:
+        return {"results": [], "indexed": n}
+
+    q_tokens = _tokenize(query)
+    pool = max(25, k * 3)
+
+    # Lexical half (always available).
+    lex = []
+    for p in passages:
+        sc = _lexical_score(q_tokens, query, p.get("text", ""))
+        if sc > 0:
+            lex.append((sc, p))
+    lex.sort(key=lambda x: -x[0])
+    lex_top = lex[:pool]
+
+    cand: dict[tuple, dict] = {}
+    for sc, p in lex_top:
+        cand[_key(p)] = {"meta": p, "lex": sc, "sem": 0.0}
+
+    # Semantic half (best-effort; absent if embeddings are unavailable).
     qv = await asyncio.to_thread(extraction.embed_texts, [query])
-    if not qv:
-        return {"results": [], "indexed": n, "error": "embeddings unavailable"}
-    return {"results": vectorstore.search(case_id, qv[0], k), "indexed": n}
+    sem_avail = bool(qv)
+    if sem_avail:
+        for r in vectorstore.search(case_id, qv[0], k=pool):
+            key = _key(r)
+            if key in cand:
+                cand[key]["sem"] = r.get("score", 0.0)
+            else:
+                cand[key] = {"meta": r, "lex": 0.0, "sem": r.get("score", 0.0)}
+
+    if not cand:
+        return {"results": [], "indexed": n,
+                **({} if sem_avail else {"mode": "keyword"})}
+
+    lex_max = max((c["lex"] for c in cand.values()), default=0.0) or 1.0
+    sem_max = max((c["sem"] for c in cand.values()), default=0.0)
+
+    results = []
+    for c in cand.values():
+        ln = c["lex"] / lex_max
+        sn = (max(0.0, c["sem"]) / sem_max) if (sem_avail and sem_max > 0) else 0.0
+        final = (0.55 * ln + 0.45 * sn) if sem_avail else ln
+        m = c["meta"]
+        results.append({
+            "doc_key": m.get("doc_key", ""), "page": m.get("page"),
+            "text": m.get("text", ""), "item_id": m.get("item_id", ""),
+            "status": m.get("status", ""), "score": round(final, 4),
+        })
+    results.sort(key=lambda x: -x["score"])
+    out = {"results": results[:max(1, k)], "indexed": n}
+    if not sem_avail:
+        out["mode"] = "keyword"  # embeddings unavailable -> lexical-only
+    return out

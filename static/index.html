@@ -121,6 +121,27 @@
   table.recon td.data{font-family:var(--mono)}
   a.src{color:var(--accent)}
 
+  /* ---- reasoning / calculation block ---- */
+  .calc{margin-top:8px; border:1px solid var(--border); border-radius:4px;
+    background:#fbfcfd; padding:8px 11px}
+  .calc-title{font-size:10.5px; font-weight:700; text-transform:uppercase;
+    letter-spacing:.05em; color:var(--muted); margin-bottom:6px}
+  .calc-steps{display:flex; flex-direction:column; gap:3px; margin-bottom:6px}
+  .calc-step{display:flex; gap:10px; flex-wrap:wrap; font-size:12.5px}
+  .cs-label{color:var(--muted); min-width:200px; flex:0 0 auto}
+  .cs-val{font-family:var(--mono)}
+  .calc-formula{font-family:var(--mono); font-size:12.5px; color:var(--ink);
+    background:#eef1f5; border:1px solid var(--border); border-radius:3px;
+    padding:3px 8px; display:inline-block; margin:0 0 5px}
+  .calc-verdict{font-size:12.5px; margin-bottom:3px}
+  .calc-gridcap{font-size:11px; color:var(--muted); margin:7px 0 3px}
+  .calc-refs{margin-top:6px; font-size:11.5px; color:var(--muted)}
+  .calc-refs .cr-label{font-weight:700; text-transform:uppercase;
+    letter-spacing:.04em; font-size:10px}
+  .calc-refs ul{margin:2px 0 0; padding-left:16px}
+  .calc-refs li{margin:1px 0}
+  mark{background:#fbf0bd; color:inherit; padding:0 1px; border-radius:2px}
+
   /* ---- OTC/PDD readiness ---- */
   .meter{height:8px; border:1px solid var(--border); border-radius:6px; overflow:hidden;
     background:#eceef1; margin:6px 0; max-width:340px}
@@ -230,9 +251,9 @@ const enc = encodeURIComponent;
 const $ = (id) => document.getElementById(id);
 const state = {
   caseId: null, reviewer: "", data: null, selectedItemId: null,
-  collapsed: { pending: true, verified: true, na: true },
+  collapsed: { pending: true, verified: true, na: true, r6: true },
   mode: "review", docTypes: [], uploadFiles: [], assign: {},
-  searchQuery: "", searchResults: null, indexMsg: "",
+  searchQuery: "", searchResults: null, searchMode: "", indexMsg: "",
 };
 
 const STATUS_LABEL = {
@@ -512,16 +533,33 @@ async function ensureIndexed(caseId){
   updateIndexStatus();
 }
 function truncate(s, n){ s = String(s || ""); return s.length > n ? s.slice(0, n) + "\u2026" : s; }
+function highlightTerms(rawText, query){
+  const text = truncate(rawText, 320);
+  const toks = Array.from(new Set((String(query).toLowerCase().match(/[a-z0-9]+/g) || [])))
+    .filter(t => t.length >= 2);
+  if(!toks.length) return esc(text);
+  const re = new RegExp("(" + toks.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|") + ")", "gi");
+  let out = "", last = 0, m;
+  while((m = re.exec(text)) !== null){
+    out += esc(text.slice(last, m.index)) + "<mark>" + esc(m[0]) + "</mark>";
+    last = m.index + m[0].length;
+    if(m.index === re.lastIndex) re.lastIndex++;  // guard against zero-length match
+  }
+  return out + esc(text.slice(last));
+}
 function searchResultsHtml(){
   const rs = state.searchResults;
   if(rs === null) return "";
-  if(rs.length === 0) return '<div class="muted">No matches.</div>';
-  return rs.map(r => {
+  const note = state.searchMode === "keyword"
+    ? '<div class="faint" style="margin-bottom:6px">Keyword matches (semantic index unavailable).</div>'
+    : "";
+  if(rs.length === 0) return note + '<div class="muted">No matches.</div>';
+  return note + rs.map(r => {
     const link = r.page ? srcLink(r.doc_key, r.page, r.doc_key + " p." + r.page)
                         : '<span class="mono">' + esc(r.doc_key) + "</span>";
     return '<div class="sr"><div class="srhead">' + link
       + ' <span class="faint num">score ' + esc(r.score) + "</span></div>"
-      + '<div class="srtext">' + esc(truncate(r.text, 320)) + "</div></div>";
+      + '<div class="srtext">' + highlightTerms(r.text, state.searchQuery) + "</div></div>";
   }).join("");
 }
 function updateSearchResults(){
@@ -539,6 +577,7 @@ async function doSearch(){
     const r = await fetchJSON("/api/cases/" + enc(state.caseId)
       + "/search?q=" + enc(q));
     state.searchResults = r.results || [];
+    state.searchMode = r.mode || "";
     updateSearchResults();
     if(r.error && el){ el.innerHTML = '<div class="muted">' + esc(r.error) + "</div>"; }
   }catch(e){
@@ -613,6 +652,39 @@ function cellVal(doc, cell){
   const link = cell.page ? " " + srcLink(cell.doc_id || doc, cell.page, "p." + cell.page) : "";
   return disp + link;
 }
+// Renders the "reasoning & calculation with proof" block shared by the
+// reconciliation and policy checks. Every figure links back to its source page;
+// policy clauses are quoted verbatim as the basis.
+function calcBlock(extra){
+  const c = extra && extra.calculation;
+  if(!c) return "";
+  let steps = "";
+  if(c.steps && c.steps.length){
+    steps = '<div class="calc-steps">' + c.steps.map(s => {
+      const link = (s.doc && s.page) ? " " + srcLink(s.doc, s.page, "p." + s.page) : "";
+      return '<div class="calc-step"><span class="cs-label">' + esc(s.label)
+        + '</span><span class="cs-val">' + esc(s.value) + link + "</span></div>";
+    }).join("") + "</div>";
+  }
+  const formula = c.result ? '<div class="calc-formula">' + esc(c.result) + "</div>" : "";
+  const verdict = c.verdict ? '<div class="calc-verdict">' + esc(c.verdict) + "</div>" : "";
+  let grid = "";
+  if(c.grid && c.grid.rows && c.grid.rows.length){
+    const head = (c.grid.columns || []).map(h => "<th>" + esc(h) + "</th>").join("");
+    const body = c.grid.rows.map(r =>
+      "<tr>" + r.map(x => "<td>" + esc(x) + "</td>").join("") + "</tr>").join("");
+    grid = '<div class="calc-gridcap">Published grid &middot; ' + esc(c.grid.slab || "")
+      + " slab</div><table class=\"recon\"><thead><tr>" + head
+      + "</tr></thead><tbody>" + body + "</tbody></table>";
+  }
+  const refs = (c.references && c.references.length)
+    ? '<div class="calc-refs"><span class="cr-label">Policy basis</span><ul>'
+      + c.references.map(r => "<li>" + esc(r) + "</li>").join("") + "</ul></div>"
+    : "";
+  return '<div class="calc">'
+    + (c.title ? '<div class="calc-title">' + esc(c.title) + "</div>" : "")
+    + steps + formula + verdict + grid + refs + "</div>";
+}
 function reconValuesTable(extra){
   const rv = extra && extra.recon_values ? extra.recon_values : null;
   if(!rv) return "";
@@ -664,13 +736,27 @@ function conditionsBlock(extra){
 
 function reconItemHtml(item){
   const isCond = item.extra && Array.isArray(item.extra.conditions);
-  const detail = isCond ? conditionsBlock(item.extra) : reconValuesTable(item.extra);
+  const detail = isCond ? conditionsBlock(item.extra)
+                        : (reconValuesTable(item.extra) + calcBlock(item.extra));
   return '<div class="item" data-rowitem="' + esc(item.id) + '">'
     + '<div class="head"><span class="idbadge">' + esc(item.id) + "</span>"
     + pill(item.status) + lowconfFlag(item) + "</div>"
     + '<div class="text">' + esc(item.text) + "</div>"
     + '<div class="finding">' + esc(item.finding) + "</div>"
     + detail
+    + decisionBlock(item)
+    + actionBlock(item)
+    + "</div>";
+}
+// Policy (pricing) lines lead with the calculation + the quoted policy clause.
+function policyItemHtml(item){
+  return '<div class="item" data-rowitem="' + esc(item.id) + '">'
+    + '<div class="head"><span class="idbadge">' + esc(item.id) + "</span>"
+    + '<span class="sectag">' + esc(item.section) + "</span>"
+    + pill(item.status) + lowconfFlag(item) + "</div>"
+    + '<div class="text">' + esc(item.text) + "</div>"
+    + '<div class="finding">' + esc(item.finding) + "</div>"
+    + calcBlock(item.extra)
     + decisionBlock(item)
     + actionBlock(item)
     + "</div>";
@@ -748,11 +834,24 @@ function render(){
     + (unknown ? '<div class="inv-line"><span class="k">Unrecognised</span><span class="chips">' + unknown + "</span></div>" : "")
     + errLine;
 
-  // reconciliation + triage
-  const recon = (d.items || []).filter(it => (it.section || "").startsWith("R."));
-  const triage = (d.items || []).filter(it => !(it.section || "").startsWith("R."));
+  // Split into panels by family. Policy (P.) and reconciliation (R.) lead with
+  // the calculation; the long sanction-conditions tracker (R6) is moved to its
+  // own collapsed panel at the very bottom (it has low readability inline). The
+  // rest (A-J) are triaged exception-first.
+  const byId = (a, b) => String(a.id).localeCompare(b.id, undefined, { numeric: true });
+  const items = d.items || [];
+  const policy = items.filter(it => (it.section || "").startsWith("P.")).sort(byId);
+  const recon = items.filter(it => (it.section || "").startsWith("R.") && it.id !== "R6").sort(byId);
+  const r6 = items.find(it => it.id === "R6");
+  const triage = items.filter(it => {
+    const s = it.section || "";
+    return !s.startsWith("R.") && !s.startsWith("P.");
+  });
   const g = group(triage);
 
+  const policyHtml = policy.length
+    ? policy.map(policyItemHtml).join("")
+    : '<div class="empty">No policy checks.</div>';
   const reconHtml = recon.length
     ? recon.map(reconItemHtml).join("")
     : '<div class="empty">No reconciliation checks.</div>';
@@ -769,13 +868,21 @@ function render(){
     + '<span class="right"><span id="indexStatus" class="faint">' + esc(state.indexMsg || "") + "</span></span></h2>"
     + '<div class="body"><div class="searchrow">'
     + '<input id="searchBox" class="note-in" type="text" '
-    + 'placeholder="Search document text (e.g. prepayment, mortgage, possession date)" '
+    + 'placeholder="Search document text (e.g. Aadhaar, survey number, prepayment)" '
     + 'value="' + esc(state.searchQuery || "") + '">'
     + '<button class="act" id="searchBtn">Search</button></div>'
     + '<div id="searchResults" style="margin-top:10px">' + searchResultsHtml() + "</div>"
     + "</div></section>";
-  html += '<section class="panel"><h2>Cross-document reconciliation</h2><div class="body" style="padding:0">'
-    + reconHtml + "</div></section>";
+
+  if(policy.length){
+    html += '<section class="panel"><h2>Policy compliance &middot; pricing'
+      + '<span class="right faint">interest &amp; fees vs the published grid</span></h2>'
+      + '<div class="body" style="padding:0">' + policyHtml + "</div></section>";
+  }
+
+  html += '<section class="panel"><h2>Cross-document reconciliation'
+    + '<span class="right faint">same fact agrees across documents</span></h2>'
+    + '<div class="body" style="padding:0">' + reconHtml + "</div></section>";
 
   html += '<section class="panel"><h2>Needs attention <span class="count">' + g.attention.length + "</span></h2>"
     + '<div class="body" style="padding:0">'
@@ -793,6 +900,12 @@ function render(){
   html += collapsiblePanel("na", "Not applicable", g.na.length,
     (g.na.length ? g.na.map(triageItemHtml).join("") : '<div class="empty">None.</div>'),
     "", false);
+
+  if(r6){
+    const nConds = (r6.extra && Array.isArray(r6.extra.conditions)) ? r6.extra.conditions.length : 0;
+    html += collapsiblePanel("r6", "Sanction conditions (OTC / PDD)", nConds,
+      reconItemHtml(r6), '<span class="faint">tracked to evidence</span>', false);
+  }
 
   $("main").innerHTML = html;
   // reapply selection highlight

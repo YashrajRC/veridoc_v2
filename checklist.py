@@ -25,6 +25,7 @@ from typing import Optional
 class EvalMode(str, Enum):
     AUTO_DOC = "auto_doc"        # extract from one document + apply a rule
     AUTO_RECON = "auto_recon"    # cross-document reconciliation rule
+    AUTO_POLICY = "auto_policy"  # check a sanctioned term against the pricing grid
     SIGNOFF = "signoff"          # sign/seal/notary: detect, then human authenticates
     MANUAL = "manual"            # policy-driven human-only check
     SYSTEM = "system"            # needs LOS/system data -> pending
@@ -127,6 +128,20 @@ CHECKLIST: list[ChecklistItem] = [
     # --- J. Deviations (system) ---------------------------------------------
     ChecklistItem("J1", "J. Deviations", "Deviations approved at correct authority",
                   EvalMode.SYSTEM),
+
+    # --- P. Policy / pricing compliance (sanctioned terms vs the grid) ------
+    # Checked against the lender's published pricing grid (see policy.py). These
+    # show the arithmetic and quote the policy clause as proof; where the exact
+    # grid cell cannot be pinned without CIBIL/profile they state the published
+    # window and route to a human rather than guessing.
+    ChecklistItem("P1", "P. Policy (pricing)",
+                  "Interest rate within the sanctioned pricing grid",
+                  EvalMode.AUTO_POLICY, recon_docs=("sanction",),
+                  rule="policy_roi"),
+    ChecklistItem("P2", "P. Policy (pricing)",
+                  "Processing & login fees within the pricing policy",
+                  EvalMode.AUTO_POLICY, recon_docs=("sanction",),
+                  rule="policy_fees"),
 
     # --- Cross-document reconciliation (no system data required) ------------
     ChecklistItem("R1", "R. Reconciliation", "Borrower name consistent across documents",

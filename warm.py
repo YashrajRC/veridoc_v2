@@ -34,36 +34,51 @@ async def main() -> None:
         print("Expected layout: DATA_DIR/<case_id>/<document>.pdf")
         return
 
-    for case_id in cases:
-        docs, unknown = discover_documents(case_id)
-        print(f"\n[{case_id}] {len(docs)} recognised document(s): "
-              f"{', '.join(sorted(docs)) or '(none)'}")
-        if unknown:
-            print(f"   unrecognised files (ignored): {', '.join(unknown)}")
-        missing = [k for k in config.DOC_KEYS if k not in docs]
-        if missing:
-            print(f"   missing expected documents: {', '.join(missing)}")
-        if not docs:
-            continue
+    # Resumable by design: extraction and transcription are cached by file
+    # content, so re-running only does the work that is new. We print a per-case
+    # progress line and isolate failures so one bad case never aborts the run.
+    total = len(cases)
+    ok_docs = failed_docs = total_passages = cases_failed = 0
+    for n, case_id in enumerate(cases, 1):
+        try:
+            docs, unknown = discover_documents(case_id)
+            print(f"\n[{n}/{total}] {case_id}: {len(docs)} recognised document(s): "
+                  f"{', '.join(sorted(docs)) or '(none)'}")
+            if unknown:
+                print(f"   unrecognised files (ignored): {', '.join(unknown)}")
+            missing = [k for k in config.DOC_KEYS if k not in docs]
+            if missing:
+                print(f"   missing expected documents: {', '.join(missing)}")
+            if not docs:
+                continue
 
-        ext = await extract_documents(docs, use_cache=True)
-        for key in sorted(ext):
-            de = ext[key]
-            if de.ok:
-                filled = sum(1 for f in de.fields.values() if f.value is not None)
-                print(f"   {key}: ok ({filled}/{len(de.fields)} fields populated)")
-            else:
-                print(f"   {key}: FAILED - {de.error}")
+            ext = await extract_documents(docs, use_cache=True)
+            for key in sorted(ext):
+                de = ext[key]
+                if de.ok:
+                    ok_docs += 1
+                    filled = sum(1 for f in de.fields.values() if f.value is not None)
+                    print(f"   {key}: ok ({filled}/{len(de.fields)} fields populated)")
+                else:
+                    failed_docs += 1
+                    print(f"   {key}: FAILED - {de.error}")
 
-        idx = await build_index(case_id, force=True)
-        msg = f"   search index: {idx.get('indexed', 0)} passage(s)"
-        if idx.get("error"):
-            msg += f" ({idx['error']})"
-        if idx.get("errors"):
-            msg += f"; transcription errors: {idx['errors']}"
-        print(msg)
+            idx = await build_index(case_id, force=True)
+            total_passages += idx.get("indexed", 0)
+            msg = f"   search index: {idx.get('indexed', 0)} passage(s)"
+            if idx.get("error"):
+                msg += f" ({idx['error']})"
+            if idx.get("errors"):
+                msg += f"; transcription errors: {idx['errors']}"
+            print(msg)
+        except Exception as exc:  # isolate: keep warming the remaining cases
+            cases_failed += 1
+            print(f"   ERROR warming {case_id}: {type(exc).__name__}: {exc}")
 
-    print("\nDone. Cache:", config.CACHE_DIR)
+    print(f"\nDone. {total} case(s): {ok_docs} document(s) extracted, "
+          f"{failed_docs} failed, {total_passages} search passage(s) indexed"
+          + (f", {cases_failed} case(s) errored" if cases_failed else "") + ".")
+    print("Cache:", config.CACHE_DIR)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ so the UI can show the side-by-side comparison and link each value to source.
 """
 from __future__ import annotations
 
+import difflib
 import re
 from dataclasses import dataclass, field
 from typing import Optional
@@ -61,10 +62,58 @@ _AMOUNT_MULTIPLIERS = [
     (re.compile(r"\bLAKHS?\b|\bLACS?\b|\bLAC\b", re.I), 1_00_000),
 ]
 
+# Number words for the "amount in words" parser. Indian scales (lakh/crore) are
+# included alongside the international ones; sanction letters and valuation
+# reports routinely write the figure only in words.
+_WORD_UNITS = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30,
+    "forty": 40, "fourty": 40, "fifty": 50, "sixty": 60, "seventy": 70,
+    "eighty": 80, "ninety": 90,
+}
+_WORD_SCALES = {
+    "hundred": 100, "thousand": 1_000, "lakh": 1_00_000, "lakhs": 1_00_000,
+    "lac": 1_00_000, "lacs": 1_00_000, "crore": 1_00_00_000,
+    "crores": 1_00_00_000, "cr": 1_00_00_000, "million": 10_00_000,
+    "billion": 1_00_00_00_000,
+}
+
+
+def _words_to_number(value) -> Optional[float]:
+    """Convert an amount written in words ("One Crore Four Lakh ... Eighty") to a
+    number. Returns None if no number words are present. Tolerant of noise words
+    (Rupees, Only, and)."""
+    tokens = [t for t in re.findall(r"[a-zA-Z]+", str(value).lower())
+              if t in _WORD_UNITS or t in _WORD_SCALES]
+    if not tokens:
+        return None
+    total = 0
+    current = 0
+    seen = False
+    for t in tokens:
+        if t in _WORD_UNITS:
+            current += _WORD_UNITS[t]
+            seen = True
+        else:  # a scale word
+            scale = _WORD_SCALES[t]
+            seen = True
+            if current == 0:
+                current = 1
+            if scale == 100:
+                current *= 100
+            else:
+                total += current * scale
+                current = 0
+    total += current
+    return float(total) if seen and total > 0 else None
+
 
 def parse_amount(value) -> Optional[float]:
-    """Parse an Indian-format monetary string. Returns None if it cannot be
-    parsed confidently (e.g. amount written only in words)."""
+    """Parse an Indian-format monetary string. Falls back to an amount-in-words
+    parser when no digits are present; returns None only if neither a figure nor
+    number words can be read."""
     if value is None:
         return None
     if isinstance(value, (int, float)):
@@ -78,12 +127,13 @@ def parse_amount(value) -> Optional[float]:
     # Pull the first numeric group (handles 45,00,000 / 4500000 / 45.00).
     m = re.search(r"\d[\d,]*\.?\d*", s)
     if not m:
-        return None
+        # No digits: the figure may be spelled out ("One Crore Four Lakh ...").
+        return _words_to_number(s)
     num = m.group(0).replace(",", "")
     try:
         num_val = float(num)
     except ValueError:
-        return None
+        return _words_to_number(s)
     # If a unit word (lakh/crore) is present but the figure is already at or
     # above that scale, the words are a restatement of the same amount, not a
     # multiplier. e.g. "Rs. 45,00,000 (Forty Five Lakhs Only)" -> 4500000, not
@@ -92,6 +142,38 @@ def parse_amount(value) -> Optional[float]:
     if multiplier > 1 and num_val >= multiplier:
         multiplier = 1
     return num_val * multiplier
+
+
+def fmt_inr(n) -> str:
+    """Format a number with Indian digit grouping and a rupee sign:
+    2600000 -> '₹26,00,000'. Used only in the derived calculation read-outs; the
+    verbatim document value is always shown/linked alongside it."""
+    if n is None:
+        return "—"
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return str(n)
+    neg = n < 0
+    whole = int(round(abs(n)))
+    s = str(whole)
+    if len(s) > 3:
+        last3, rest = s[-3:], s[:-3]
+        groups = []
+        while len(rest) > 2:
+            groups.insert(0, rest[-2:])
+            rest = rest[:-2]
+        if rest:
+            groups.insert(0, rest)
+        s = ",".join(groups) + "," + last3
+    return ("-" if neg else "") + "₹" + s
+
+
+def _name_similarity(a, b) -> float:
+    na, nb = norm_name(a), norm_name(b)
+    if not na or not nb:
+        return 0.0
+    return difflib.SequenceMatcher(None, na, nb).ratio()
 
 
 def amounts_match(a, b, tol: float = 1.0) -> Optional[bool]:
@@ -162,17 +244,43 @@ def recon_borrower_name(item, ext: dict[str, DocumentExtraction]) -> ReconResult
             confidence="low", values=values)
 
     base_doc, base_val = present_names[0]
-    mismatches = [d for d, v in present_names[1:] if not names_match(base_val, v)]
-    if mismatches:
+    ref = norm_name(base_val) or str(base_val)
+    matched, diffs = [], []
+    for d, v in present_names[1:]:
+        if names_match(base_val, v):
+            matched.append(d)
+        else:
+            diffs.append((d, v, round(_name_similarity(base_val, v) * 100)))
+    if diffs:
+        calc = {
+            "title": "Borrower / co-applicant name consistency",
+            "steps": [{"label": d, "value": f"{v}  (~{sim}% match to reference)"}
+                      for d, v, sim in diffs],
+            "result": (f"Reference “{ref}” (from {base_doc}); "
+                       f"{len(matched)} of {len(present_names) - 1} other "
+                       f"document(s) match."),
+            "verdict": ("Differs on: " + ", ".join(d for d, _, _ in diffs)
+                        + ". A high similarity is usually OCR noise on the same "
+                        "name; a low similarity may be a co-applicant or a "
+                        "genuine mismatch — confirm."),
+            "references": [],
+        }
         return ReconResult(
             VerificationStatus.EXCEPTION,
-            f"Borrower name differs across documents ({', '.join(mismatches)} "
-            f"vs {base_doc}).",
-            confidence="high", values=values)
+            f"Borrower name differs across documents "
+            f"({', '.join(d for d, _, _ in diffs)} vs {base_doc}).",
+            confidence="high", values=values, extra={"calculation": calc})
+    calc = {
+        "title": "Borrower / co-applicant name consistency",
+        "steps": [],
+        "result": f"All {len(present_names)} document(s) reconcile to “{ref}”.",
+        "verdict": "Names consistent across the file.",
+        "references": [],
+    }
     return ReconResult(
         VerificationStatus.VERIFIED,
         f"Borrower name consistent across {len(present_names)} documents.",
-        confidence="high", values=values)
+        confidence="high", values=values, extra={"calculation": calc})
 
 
 def recon_property_identity(item, ext) -> ReconResult:
@@ -238,13 +346,29 @@ def recon_sanctioned_amount(item, ext) -> ReconResult:
         return ReconResult(VerificationStatus.MANUAL_REVIEW,
                            "Amount could not be parsed from one side; verify.",
                            confidence="low", values=values)
+    ps, pd = parse_amount(s.value), parse_amount(d.value)
+    calc = {
+        "title": "Sanctioned amount vs disbursement requested",
+        "steps": [
+            {"label": "Sanctioned (sanction letter)", "value": fmt_inr(ps),
+             "doc": s.source or "sanction", "page": s.page},
+            {"label": "Requested (DRL)", "value": fmt_inr(pd),
+             "doc": d.source or "drl", "page": d.page},
+        ],
+        "result": f"{fmt_inr(ps)} vs {fmt_inr(pd)} — difference {fmt_inr(abs(ps - pd))}",
+        "verdict": ("Amounts match." if res
+                    else "Amounts differ; reconcile before disbursing."),
+        "references": [],
+    }
     if res:
         return ReconResult(VerificationStatus.VERIFIED,
                            "Sanctioned amount matches disbursement request.",
-                           confidence="high", values=values)
+                           confidence="high", values=values,
+                           extra={"calculation": calc})
     return ReconResult(VerificationStatus.EXCEPTION,
                        "Sanctioned amount does not match disbursement request.",
-                       confidence="high", values=values)
+                       confidence="high", values=values,
+                       extra={"calculation": calc})
 
 
 def recon_ltv(item, ext) -> ReconResult:
@@ -263,18 +387,42 @@ def recon_ltv(item, ext) -> ReconResult:
                            confidence="low", values=values)
     ltv = loan / value
     pct = round(ltv * 100, 1)
-    # We do NOT have the policy cap (lives in LOS), so flag only an obviously
-    # high LTV for review and state the limitation plainly.
-    if ltv > 0.90:
+    cap = getattr(config, "LTV_REVIEW_CAP", 0.90)
+    cap_pct = round(cap * 100)
+    calc = {
+        "title": "Loan-to-value (LTV)",
+        "steps": [
+            {"label": "Sanctioned loan", "value": fmt_inr(loan),
+             "doc": sa.source or "sanction", "page": sa.page},
+            {"label": "Assessed market value", "value": fmt_inr(value),
+             "doc": mv.source or "technical", "page": mv.page},
+        ],
+        "result": f"LTV = {fmt_inr(loan)} ÷ {fmt_inr(value)} = {pct}%",
+        "verdict": (f"Above the {cap_pct}% review trigger; confirm against the "
+                    f"product LTV norm." if ltv > cap
+                    else f"Within the {cap_pct}% review trigger."),
+        "references": [
+            "HL pricing grid states no single LTV cap; the product LTV norm "
+            "(COP vs market value) is applied in LOS.",
+            "Policy: LAP special pricing requires LTV ≤ 70%; Industrial LAP "
+            "Prime ≤ 55% (Mortgage Plus ≤ 70%).",
+        ],
+    }
+    # The HL grid does not publish a single LTV cap, so we flag against a
+    # configurable review trigger and state the basis plainly.
+    if ltv > cap:
         return ReconResult(
             VerificationStatus.EXCEPTION,
-            f"LTV {pct}% looks high; confirm against policy cap (cap not "
-            f"available without LOS).",
-            confidence="medium", values=values, extra={"ltv_pct": pct})
+            f"LTV {pct}% exceeds the {cap_pct}% review trigger; confirm against "
+            f"the product cap.",
+            confidence="medium", values=values,
+            extra={"ltv_pct": pct, "calculation": calc})
     return ReconResult(
         VerificationStatus.VERIFIED,
-        f"LTV {pct}% computed; policy cap to be confirmed from LOS.",
-        confidence="medium", values=values, extra={"ltv_pct": pct})
+        f"LTV {pct}% computed; within the {cap_pct}% review trigger (confirm "
+        f"product cap).",
+        confidence="medium", values=values,
+        extra={"ltv_pct": pct, "calculation": calc})
 
 
 def recon_insurance_adequacy(item, ext) -> ReconResult:
@@ -291,13 +439,30 @@ def recon_insurance_adequacy(item, ext) -> ReconResult:
         return ReconResult(VerificationStatus.MANUAL_REVIEW,
                            "Sum assured or loan amount unparseable; verify manually.",
                            confidence="low", values=values)
+    cover = round(sum_assured / loan * 100) if loan else 0
+    calc = {
+        "title": "Insurance adequacy",
+        "steps": [
+            {"label": "Sum assured (policy)", "value": fmt_inr(sum_assured),
+             "doc": sa.source or "insurance", "page": sa.page},
+            {"label": "Sanctioned loan", "value": fmt_inr(loan),
+             "doc": loan_f.source or "sanction", "page": loan_f.page},
+        ],
+        "result": f"Sum assured {fmt_inr(sum_assured)} vs loan {fmt_inr(loan)} "
+                  f"(cover {cover}% of loan)",
+        "verdict": ("Sum assured is at least the loan amount." if sum_assured >= loan
+                    else "Sum assured is below the loan amount; cover the shortfall."),
+        "references": [],
+    }
     if sum_assured >= loan:
         return ReconResult(VerificationStatus.VERIFIED,
                            "Insurance sum assured is at least the loan amount.",
-                           confidence="medium", values=values)
+                           confidence="medium", values=values,
+                           extra={"calculation": calc})
     return ReconResult(VerificationStatus.EXCEPTION,
                        "Insurance sum assured is below the loan amount.",
-                       confidence="medium", values=values)
+                       confidence="medium", values=values,
+                       extra={"calculation": calc})
 
 
 def recon_conditions(item, ext) -> ReconResult:

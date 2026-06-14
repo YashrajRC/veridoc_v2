@@ -72,7 +72,9 @@ DOC_FIELDS: dict[str, dict[str, str]] = {
     "sanction": {
         "applicant_name": "name of the sanctioned applicant",
         "sanctioned_amount": "sanctioned loan amount, with currency as written",
-        "roi": "rate of interest",
+        "roi": "rate of interest / ROI, as written (e.g. 8.35% p.a.)",
+        "processing_fee": "processing fee, as written (amount or a percentage)",
+        "login_fee": "login / processing-login fee amount if separately stated",
         "tenure_months": "tenure in months if stated",
         "property_address": "property address if stated in the sanction letter",
         "conditions": "LIST of sanction conditions",  # special-cased

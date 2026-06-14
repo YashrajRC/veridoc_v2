@@ -89,6 +89,20 @@ def add_passages(case_id: str, rows: list[dict]) -> int:
             conn.close()
 
 
+def all_passages(case_id: str) -> list[dict]:
+    """Every stored passage (text + metadata, no vector) for a case. Used by the
+    lexical half of hybrid search, which scores raw text and does not need the
+    embeddings."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT item_id, doc_key, page, status, text "
+            "FROM passages WHERE case_id = ?", (case_id,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def count(case_id: str) -> int:
     conn = _connect()
     try:
