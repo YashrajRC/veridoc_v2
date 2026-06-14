@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Home Loan File Verification</title>
+<style>
+  :root{
+    --bg:#f4f5f7; --surface:#ffffff; --border:#d6dae0; --border-strong:#c2c8d0;
+    --ink:#1c2128; --muted:#5b6573; --faint:#8a929d;
+    --accent:#2c4a7c; --accent-ink:#21385f;
+    --row-sel:#eef3fb;
+    /* status palette: muted, paired text + background, never colour-only */
+    --ex-ink:#9a2218; --ex-bg:#fdecea; --ex-bd:#eccac5;
+    --warn-ink:#8a5a00; --warn-bg:#fbf3df; --warn-bd:#e7d6a8;
+    --miss-ink:#7a3a3a; --miss-bg:#f3ebeb; --miss-bd:#dcc9c9;
+    --pend-ink:#566070; --pend-bg:#ebeef1; --pend-bd:#d2d8de;
+    --ok-ink:#1a6e36; --ok-bg:#e9f3ec; --ok-bd:#bcd8c4;
+    --na-ink:#6a727b; --na-bg:#eef0f2; --na-bd:#d8dce1;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+    --ui:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    font-family:var(--ui); color:var(--ink); background:var(--bg);
+    font-size:13px; line-height:1.45; -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--accent); text-decoration:none}
+  a:hover{text-decoration:underline}
+  .mono{font-family:var(--mono)}
+  .num{font-variant-numeric:tabular-nums}
+  .muted{color:var(--muted)}
+  .faint{color:var(--faint)}
+
+  /* ---- top bar ---- */
+  header.topbar{
+    position:sticky; top:0; z-index:20; background:var(--surface);
+    border-bottom:1px solid var(--border-strong);
+    display:flex; align-items:center; gap:18px; padding:9px 16px;
+  }
+  .brand{font-weight:650; letter-spacing:.01em; font-size:13.5px; white-space:nowrap}
+  .brand .sub{color:var(--faint); font-weight:500; margin-left:8px}
+  .topbar .spacer{flex:1}
+  .field{display:flex; align-items:center; gap:6px}
+  .field label{color:var(--muted); font-size:12px}
+  select,input[type=text]{
+    font:inherit; color:var(--ink); background:var(--surface);
+    border:1px solid var(--border-strong); border-radius:3px; padding:4px 7px;
+  }
+  input.flash{border-color:var(--ex-ink); background:var(--ex-bg)}
+  .statusline{padding:5px 16px; min-height:24px; color:var(--muted); font-size:12px;
+    border-bottom:1px solid var(--border); background:#fafbfc}
+  .statusline.err{color:var(--ex-ink); background:var(--ex-bg)}
+
+  /* ---- layout ---- */
+  main{display:block; padding:16px; max-width:1180px; margin:0 auto;
+    transition:margin-right .15s ease}
+  body.drawer-open main{margin-right:46vw}
+  .panel{background:var(--surface); border:1px solid var(--border);
+    border-radius:5px; margin-bottom:14px}
+  .panel > h2{
+    margin:0; padding:9px 13px; font-size:12px; font-weight:650;
+    text-transform:uppercase; letter-spacing:.05em; color:var(--muted);
+    border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px}
+  .panel > h2 .count{color:var(--faint); font-weight:600}
+  .panel > h2 .right{margin-left:auto; display:flex; gap:8px; align-items:center}
+  .panel .body{padding:11px 13px}
+
+  /* ---- summary ---- */
+  .sumrow{display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px}
+  .progress{flex:1; min-width:180px; height:8px; background:#eceef1;
+    border:1px solid var(--border); border-radius:6px; overflow:hidden}
+  .progress > i{display:block; height:100%; background:var(--accent); width:0}
+  .progress-label{font-size:12px; color:var(--muted); white-space:nowrap}
+  .counts{display:flex; flex-wrap:wrap; gap:6px}
+
+  /* ---- status pill ---- */
+  .pill{display:inline-flex; align-items:center; gap:5px; font-size:11px;
+    font-weight:600; padding:1.5px 7px; border-radius:10px; border:1px solid;
+    white-space:nowrap; line-height:1.5}
+  .pill .dot{width:6px; height:6px; border-radius:50%; background:currentColor; opacity:.85}
+  .pill.exception{color:var(--ex-ink); background:var(--ex-bg); border-color:var(--ex-bd)}
+  .pill.needs_signoff,.pill.manual_review{color:var(--warn-ink); background:var(--warn-bg); border-color:var(--warn-bd)}
+  .pill.document_missing{color:var(--miss-ink); background:var(--miss-bg); border-color:var(--miss-bd)}
+  .pill.pending_system{color:var(--pend-ink); background:var(--pend-bg); border-color:var(--pend-bd)}
+  .pill.verified{color:var(--ok-ink); background:var(--ok-bg); border-color:var(--ok-bd)}
+  .pill.not_applicable{color:var(--na-ink); background:var(--na-bg); border-color:var(--na-bd)}
+  .lowconf{color:var(--warn-ink); background:var(--warn-bg); border:1px solid var(--warn-bd);
+    font-size:10.5px; font-weight:600; padding:1px 6px; border-radius:9px}
+
+  /* ---- document inventory ---- */
+  .chips{display:flex; flex-wrap:wrap; gap:6px; align-items:center}
+  .chip{font-family:var(--mono); font-size:11.5px; padding:2px 8px; border-radius:3px;
+    border:1px solid var(--border); background:#fbfcfd; color:var(--ink)}
+  .chip.miss{color:var(--miss-ink); background:var(--miss-bg); border-color:var(--miss-bd)}
+  .chip.unk{color:var(--warn-ink); background:var(--warn-bg); border-color:var(--warn-bd)}
+  .inv-line{display:flex; gap:10px; align-items:baseline; margin:3px 0}
+  .inv-line .k{width:104px; color:var(--muted); font-size:12px; flex:none}
+
+  /* ---- item / check rows ---- */
+  .item{border-top:1px solid var(--border); padding:10px 13px}
+  .item:first-child{border-top:none}
+  .item.selected{background:var(--row-sel); box-shadow:inset 3px 0 0 var(--accent)}
+  .item .head{display:flex; align-items:center; gap:9px; flex-wrap:wrap}
+  .idbadge{font-family:var(--mono); font-size:11px; color:var(--muted);
+    border:1px solid var(--border); border-radius:3px; padding:0 5px; background:#fbfcfd}
+  .sectag{font-size:11px; color:var(--faint)}
+  .item .text{margin:4px 0 2px; font-weight:550}
+  .item .finding{color:var(--muted); font-size:12.5px}
+  .evidence{margin-top:5px; display:flex; flex-wrap:wrap; gap:5px 12px; font-size:12px}
+  .evidence .src{font-family:var(--mono); font-size:11.5px}
+  .snip{color:var(--faint); font-style:italic}
+
+  /* ---- reconciliation tables ---- */
+  table.recon{border-collapse:collapse; width:100%; margin-top:7px; font-size:12px}
+  table.recon th,table.recon td{border:1px solid var(--border); padding:4px 8px; text-align:left; vertical-align:top}
+  table.recon th{background:#f6f8fa; color:var(--muted); font-weight:600; font-size:11px;
+    text-transform:uppercase; letter-spacing:.03em}
+  table.recon td.doc{font-family:var(--mono); color:var(--ink); white-space:nowrap; width:1%}
+  table.recon td.data{font-family:var(--mono)}
+  a.src{color:var(--accent)}
+
+  /* ---- OTC/PDD readiness ---- */
+  .meter{height:8px; border:1px solid var(--border); border-radius:6px; overflow:hidden;
+    background:#eceef1; margin:6px 0; max-width:340px}
+  .meter > i{display:block; height:100%}
+  .meter.open > i{background:var(--warn-ink)}
+  .meter.clear > i{background:var(--ok-ink)}
+  .typetag{font-family:var(--mono); font-size:10.5px; font-weight:700; padding:1px 6px;
+    border-radius:3px; border:1px solid}
+  .typetag.OTC{color:var(--ex-ink); background:var(--ex-bg); border-color:var(--ex-bd)}
+  .typetag.PDD{color:var(--accent); background:#eef3fb; border-color:#cdd9ec}
+  .typetag.UNKNOWN{color:var(--na-ink); background:var(--na-bg); border-color:var(--na-bd)}
+
+  /* ---- actions ---- */
+  .actions{margin-top:9px; display:flex; flex-wrap:wrap; gap:6px; align-items:center}
+  .act{font:inherit; font-size:12px; font-weight:550; cursor:pointer;
+    border:1px solid var(--border-strong); background:var(--surface); color:var(--ink);
+    border-radius:3px; padding:3px 10px}
+  .act:hover{border-color:var(--accent); color:var(--accent-ink)}
+  .act.primary{background:var(--accent); border-color:var(--accent); color:#fff}
+  .act.primary:hover{background:var(--accent-ink); color:#fff}
+  .act.neg{color:var(--ex-ink); border-color:var(--ex-bd)}
+  .act.neg:hover{border-color:var(--ex-ink); color:var(--ex-ink)}
+  .note-in{font:inherit; font-size:12px; padding:3px 7px; min-width:170px; flex:1;
+    border:1px solid var(--border); border-radius:3px}
+  .decided{margin-top:7px; font-size:12px; color:var(--muted);
+    border-left:2px solid var(--ok-bd); padding:2px 0 2px 9px}
+  .decided .who{color:var(--ink); font-weight:600}
+  .decided .note{display:block; color:var(--faint)}
+
+  .collapsed .body{display:none}
+  .toggle{cursor:pointer; user-select:none}
+  .toggle .caret{display:inline-block; width:9px; color:var(--faint); transition:transform .12s}
+  .collapsed .toggle .caret{transform:rotate(-90deg)}
+  .panel.dim{opacity:.78}
+  .panel.dim .item .text{font-weight:500}
+
+  /* ---- drawer ---- */
+  aside.drawer{position:fixed; top:0; right:0; height:100vh; width:46vw;
+    background:var(--surface); border-left:1px solid var(--border-strong);
+    transform:translateX(100%); transition:transform .15s ease; z-index:30;
+    display:flex; flex-direction:column}
+  body.drawer-open aside.drawer{transform:translateX(0)}
+  .drawer .dhead{display:flex; align-items:center; gap:10px; padding:8px 12px;
+    border-bottom:1px solid var(--border)}
+  .drawer .dhead .t{font-family:var(--mono); font-size:12px}
+  .drawer iframe{flex:1; border:none; width:100%}
+  .iconbtn{font:inherit; cursor:pointer; border:1px solid var(--border-strong);
+    background:var(--surface); border-radius:3px; padding:2px 9px; font-size:12px}
+
+  .kbd-hint{font-size:11.5px; color:var(--faint); padding:0 16px 16px;
+    max-width:1180px; margin:0 auto}
+  .kbd-hint kbd{font-family:var(--mono); font-size:11px; background:#eceef1;
+    border:1px solid var(--border); border-radius:3px; padding:0 4px}
+  .empty{padding:30px 13px; color:var(--muted); text-align:center}
+  .searchrow{display:flex; gap:8px; align-items:center; flex-wrap:wrap}
+  #searchBox{min-width:300px; flex:1}
+  .sr{border-top:1px solid var(--border); padding:7px 0}
+  .sr:first-child{border-top:none}
+  .sr .srhead{display:flex; align-items:center; gap:8px; margin-bottom:2px}
+  .sr .srtext{color:var(--muted); font-size:12.5px}
+
+  @media (max-width:900px){
+    body.drawer-open main{margin-right:0}
+    aside.drawer{width:100vw}
+  }
+  @media (prefers-reduced-motion: reduce){
+    *{transition:none !important; animation:none !important}
+  }
+  :focus-visible{outline:2px solid var(--accent); outline-offset:1px}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">Home Loan File Verification<span class="sub">document review console</span></div>
+  <div class="spacer"></div>
+  <div class="field">
+    <label for="caseSel">Case</label>
+    <select id="caseSel"><option value="">Select…</option></select>
+  </div>
+  <button class="iconbtn" id="newCaseBtn">New case</button>
+  <div class="field">
+    <label for="reviewer">Reviewer</label>
+    <input id="reviewer" type="text" placeholder="your name" autocomplete="off" size="14">
+  </div>
+</header>
+<div id="statusline" class="statusline">Select a case to begin.</div>
+
+<main id="main"><div class="empty">No case loaded.</div></main>
+<div class="kbd-hint" id="kbdHint" hidden>
+  Keyboard: <kbd>j</kbd>/<kbd>k</kbd> move &middot; <kbd>a</kbd> accept / confirm &middot;
+  <kbd>d</kbd> decline / confirm issue &middot; <kbd>o</kbd> open evidence
+</div>
+
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="dhead">
+    <span class="t" id="drawerTitle">Document</span>
+    <span class="spacer" style="flex:1"></span>
+    <a id="drawerNewTab" class="iconbtn" target="_blank" rel="noopener">Open in new tab</a>
+    <button class="iconbtn" id="drawerClose">Close</button>
+  </div>
+  <iframe id="pdfFrame" title="Document viewer"></iframe>
+</aside>
+
+<script>
+"use strict";
+const enc = encodeURIComponent;
+const $ = (id) => document.getElementById(id);
+const state = {
+  caseId: null, reviewer: "", data: null, selectedItemId: null,
+  collapsed: { pending: true, verified: true, na: true },
+  mode: "review", docTypes: [], uploadFiles: [], assign: {},
+  searchQuery: "", searchResults: null, indexMsg: "",
+};
+
+const STATUS_LABEL = {
+  verified:"Verified", exception:"Exception", document_missing:"Missing",
+  pending_system:"Pending system", not_applicable:"N/A",
+  manual_review:"Manual review", needs_signoff:"Needs sign-off",
+};
+const ACTION_LABEL = {
+  accept:"Accept", decline:"Decline", override_accept:"Override and accept",
+  confirm_issue:"Confirm issue", raise_query:"Raise query", note:"Add note",
+  waive:"Waive", confirm_signoff:"Confirm sign-off",
+};
+const POSITIVE = new Set(["accept","confirm_signoff","override_accept"]);
+const NEGATIVE = new Set(["decline","confirm_issue"]);
+
+function esc(s){
+  return String(s==null?"":s).replace(/[&<>"']/g, c => (
+    {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function setStatus(msg, isErr){
+  const el = $("statusline");
+  el.textContent = msg || "";
+  el.classList.toggle("err", !!isErr);
+}
+function showError(msg){ setStatus(msg, true); }
+
+async function fetchJSON(url, opts){
+  const r = await fetch(url, opts);
+  const txt = await r.text();
+  let body = null;
+  try { body = txt ? JSON.parse(txt) : null; } catch { body = txt; }
+  if(!r.ok){
+    const d = (body && body.detail !== undefined) ? body.detail : (body || r.statusText);
+    throw new Error(typeof d === "string" ? d : JSON.stringify(d));
+  }
+  return body;
+}
+
+// ---- loading ----
+async function refreshCases(selectId){
+  try{
+    const r = await fetchJSON("/api/cases");
+    const sel = $("caseSel");
+    sel.innerHTML = '<option value="">Select…</option>';
+    (r.cases || []).forEach(c => {
+      const o = document.createElement("option");
+      o.value = c; o.textContent = c; sel.appendChild(o);
+    });
+    if(selectId) sel.value = selectId;
+    return r.cases || [];
+  }catch(e){ showError("Could not load case list: " + e.message); return []; }
+}
+
+async function init(){
+  try{ state.reviewer = localStorage.getItem("hl_reviewer") || ""; }catch{}
+  $("reviewer").value = state.reviewer;
+  try{
+    const dt = await fetchJSON("/api/doc-types");
+    state.docTypes = dt.doc_types || [];
+  }catch{ state.docTypes = []; }
+  const cases = await refreshCases(null);
+  if(cases.length === 0){
+    setStatus('No cases yet. Use "New case" to upload documents, or place them under DATA_DIR/<case_id>/.');
+  } else {
+    setStatus('Select a case, or use "New case" to upload documents.');
+  }
+}
+
+async function loadCase(caseId){
+  if(!caseId){ state.data = null; state.mode = "review";
+    $("main").innerHTML = '<div class="empty">No case loaded.</div>';
+    $("kbdHint").hidden = true; return; }
+  state.caseId = caseId; state.selectedItemId = null; state.mode = "review";
+  state.searchQuery = ""; state.searchResults = null; state.indexMsg = "";
+  setStatus("Loading " + caseId + "…");
+  try{
+    state.data = await fetchJSON("/api/cases/" + enc(caseId));
+    render();
+    setStatus("Loaded " + caseId + ".");
+    ensureIndexed(caseId);  // background; enables the search box when ready
+  }catch(e){ showError("Could not load case: " + e.message); }
+}
+
+// ---- new case / upload ----
+function docTypeOptions(){
+  return (state.docTypes || [])
+    .map(d => '<option value="' + esc(d.key) + '">' + esc(d.label) + "</option>").join("");
+}
+function guessType(name){
+  const n = String(name).toLowerCase().replace(/[^a-z0-9]/g, "");
+  for(const d of (state.docTypes || [])){
+    if(n.includes(d.key.replace(/[^a-z0-9]/g, ""))) return d.key;
+  }
+  const hints = { valuation:"technical", tsr:"legal", lsr:"legal", search:"legal",
+    policy:"insurance", offer:"sanction", disbursement:"drl", agreement:"loan_agreement",
+    field:"fi", enduse:"enduse" };
+  for(const k in hints){ if(n.includes(k)) return hints[k]; }
+  return "";
+}
+function renderUpload(){
+  state.mode = "upload";
+  $("kbdHint").hidden = true;
+  closeDoc();
+  $("main").innerHTML =
+    '<section class="panel"><h2>New case &middot; upload documents</h2><div class="body">'
+    + '<p class="muted">Add the PDF documents for this loan file. Scanned PDFs are '
+    + "expected. Assign a document type to each file, then start verification. "
+    + "Files left unassigned are skipped; types you do not upload will show as "
+    + "missing on the checklist.</p>"
+    + '<input id="fileInput" type="file" accept="application/pdf,.pdf" multiple>'
+    + '<div id="fileRows" style="margin-top:11px"></div>'
+    + '<div class="actions" style="margin-top:13px">'
+    + '<button class="act primary" id="startUpload" disabled>Upload and start verification</button>'
+    + '<button class="act" id="cancelUpload">Cancel</button></div>'
+    + '<div id="uploadMsg" class="muted" style="margin-top:9px"></div>'
+    + "</div></section>";
+  $("fileInput").addEventListener("change", onFilesChosen);
+  $("cancelUpload").addEventListener("click", () => {
+    state.mode = "review";
+    if(state.data) render();
+    else $("main").innerHTML = '<div class="empty">No case loaded.</div>';
+    setStatus("Cancelled.");
+  });
+  $("startUpload").addEventListener("click", startUpload);
+}
+function onFilesChosen(){
+  state.uploadFiles = Array.from(($("fileInput").files) || []);
+  state.assign = {};
+  const opts = docTypeOptions();
+  const rows = state.uploadFiles.map((f, i) => {
+    const g = guessType(f.name); state.assign[i] = g;
+    const sizeMb = (f.size / 1048576).toFixed(2);
+    const big = f.size > 18 * 1048576
+      ? ' <span class="lowconf">large &mdash; may exceed extraction limit</span>' : "";
+    const notpdf = (!/\.pdf$/i.test(f.name) && f.type !== "application/pdf")
+      ? ' <span class="lowconf">not a PDF</span>' : "";
+    return '<div class="inv-line" style="align-items:center; gap:9px">'
+      + '<span class="chip">' + esc(f.name) + "</span>"
+      + '<span class="muted num">' + sizeMb + " MB</span>" + big + notpdf
+      + '<span style="flex:1"></span>'
+      + '<select data-fidx="' + i + '"><option value="">Unassigned</option>' + opts + "</select>"
+      + "</div>";
+  }).join("");
+  $("fileRows").innerHTML = rows || '<span class="muted">No files chosen.</span>';
+  state.uploadFiles.forEach((f, i) => {
+    const sel = document.querySelector('select[data-fidx="' + i + '"]');
+    if(sel){ sel.value = state.assign[i] || "";
+      sel.addEventListener("change", e => {
+        state.assign[+e.target.getAttribute("data-fidx")] = e.target.value;
+        updateStartBtn();
+      }); }
+  });
+  updateStartBtn();
+}
+function updateStartBtn(){
+  const btn = $("startUpload");
+  if(btn) btn.disabled = Object.values(state.assign || {}).filter(Boolean).length === 0;
+}
+async function startUpload(){
+  const entries = [];
+  Object.keys(state.assign || {}).forEach(i => {
+    const k = state.assign[i];
+    if(k) entries.push({ file: state.uploadFiles[i], docKey: k });
+  });
+  if(entries.length === 0) return;
+  const keys = entries.map(e => e.docKey);
+  const dup = keys.find((k, idx) => keys.indexOf(k) !== idx);
+  if(dup){
+    $("uploadMsg").innerHTML = '<span style="color:var(--ex-ink)">Each document type '
+      + "can be assigned to one file only. Duplicate: " + esc(dup) + "</span>";
+    return;
+  }
+  $("startUpload").disabled = true; $("cancelUpload").disabled = true;
+  try{
+    $("uploadMsg").textContent = "Creating case…";
+    const c = await fetchJSON("/api/cases", { method:"POST" });
+    const cid = c.case_id;
+    for(let i = 0; i < entries.length; i++){
+      const e = entries[i];
+      $("uploadMsg").textContent = "Uploading " + e.docKey + " (" + (i + 1)
+        + " of " + entries.length + ")…";
+      const fd = new FormData();
+      fd.append("file", e.file, e.file.name);
+      const r = await fetch("/api/cases/" + enc(cid) + "/files/" + enc(e.docKey),
+        { method:"POST", body: fd });
+      if(!r.ok){
+        let t = await r.text();
+        try{ const j = JSON.parse(t); t = j.detail || t; }catch{}
+        throw new Error(e.docKey + ": " + t);
+      }
+    }
+    $("uploadMsg").textContent = "Verifying documents (first run may take a moment)…";
+    await refreshCases(cid);
+    state.mode = "review";
+    await loadCase(cid);
+  }catch(err){
+    $("uploadMsg").innerHTML = '<span style="color:var(--ex-ink)">Upload failed: '
+      + esc(err.message) + "</span>";
+    $("startUpload").disabled = false; $("cancelUpload").disabled = false;
+  }
+}
+
+// ---- search / index ----
+function updateIndexStatus(){
+  const el = $("indexStatus");
+  if(el) el.textContent = state.indexMsg || "";
+}
+async function ensureIndexed(caseId){
+  state.indexMsg = "indexing for search…"; updateIndexStatus();
+  try{
+    const r = await fetchJSON("/api/cases/" + enc(caseId) + "/index", { method:"POST" });
+    if(caseId !== state.caseId) return;  // user moved on
+    state.indexMsg = r.indexed
+      ? ("search ready \u00b7 " + r.indexed + " passages")
+      : (r.error || "search index empty");
+  }catch(e){ state.indexMsg = "search index unavailable"; }
+  updateIndexStatus();
+}
+function truncate(s, n){ s = String(s || ""); return s.length > n ? s.slice(0, n) + "\u2026" : s; }
+function searchResultsHtml(){
+  const rs = state.searchResults;
+  if(rs === null) return "";
+  if(rs.length === 0) return '<div class="muted">No matches.</div>';
+  return rs.map(r => {
+    const link = r.page ? srcLink(r.doc_key, r.page, r.doc_key + " p." + r.page)
+                        : '<span class="mono">' + esc(r.doc_key) + "</span>";
+    return '<div class="sr"><div class="srhead">' + link
+      + ' <span class="faint num">score ' + esc(r.score) + "</span></div>"
+      + '<div class="srtext">' + esc(truncate(r.text, 320)) + "</div></div>";
+  }).join("");
+}
+function updateSearchResults(){
+  const el = $("searchResults");
+  if(el) el.innerHTML = searchResultsHtml();
+}
+async function doSearch(){
+  const box = $("searchBox");
+  const q = box ? box.value.trim() : "";
+  state.searchQuery = q;
+  if(!q){ state.searchResults = null; updateSearchResults(); return; }
+  const el = $("searchResults");
+  if(el) el.innerHTML = '<div class="muted">Searching…</div>';
+  try{
+    const r = await fetchJSON("/api/cases/" + enc(state.caseId)
+      + "/search?q=" + enc(q));
+    state.searchResults = r.results || [];
+    updateSearchResults();
+    if(r.error && el){ el.innerHTML = '<div class="muted">' + esc(r.error) + "</div>"; }
+  }catch(e){
+    if(el) el.innerHTML = '<div style="color:var(--ex-ink)">Search failed: '
+      + esc(e.message) + "</div>";
+  }
+}
+
+// ---- rendering helpers ----
+function pill(status){
+  return '<span class="pill ' + esc(status) + '"><span class="dot"></span>'
+    + esc(STATUS_LABEL[status] || status) + '</span>';
+}
+function pillCount(status, n){
+  return '<span class="pill ' + esc(status) + '"><span class="dot"></span>'
+    + esc(STATUS_LABEL[status] || status) + ' ' + n + '</span>';
+}
+function lowconfFlag(item){
+  return item.confidence === "low" ? '<span class="lowconf">low confidence</span>' : "";
+}
+function srcLink(doc, page, label){
+  const p = page ? ' data-page="' + page + '"' : "";
+  return '<a href="#" class="src" data-doc="' + esc(doc) + '"' + p + '>'
+    + esc(label || (doc + (page ? " p." + page : ""))) + '</a>';
+}
+function evidenceBlock(item){
+  const ev = item.evidence || [];
+  if(ev.length === 0) return "";
+  const seen = new Set(); const links = [];
+  ev.forEach(e => {
+    if(!e || !e.doc_key) return;
+    const key = e.doc_key + ":" + (e.page || "");
+    if(seen.has(key)) return; seen.add(key);
+    links.push(srcLink(e.doc_key, e.page, "Open " + e.doc_key + (e.page ? " p." + e.page : "")));
+  });
+  const snip = ev.find(e => e && e.snippet);
+  const snipHtml = snip ? '<span class="snip">&ldquo;' + esc(snip.snippet) + '&rdquo;</span>' : "";
+  if(links.length === 0 && !snipHtml) return "";
+  return '<div class="evidence">' + links.join("") + snipHtml + "</div>";
+}
+function decisionBlock(item){
+  const d = item.decision;
+  if(!d) return "";
+  let when = d.created_at;
+  try{ when = new Date(d.created_at).toLocaleString(); }catch{}
+  const note = d.note ? '<span class="note">Note: ' + esc(d.note) + "</span>" : "";
+  return '<div class="decided"><span class="who">'
+    + esc(ACTION_LABEL[d.action] || d.action) + "</span> by " + esc(d.reviewer)
+    + ' &middot; <span class="num">' + esc(when) + "</span>" + note + "</div>";
+}
+function actionBlock(item){
+  const acts = item.allowed_actions || [];
+  if(acts.length === 0) return "";
+  const btns = acts.map(a => {
+    let cls = "act";
+    if(POSITIVE.has(a)) cls += " primary";
+    else if(NEGATIVE.has(a) || a === "decline") cls += " neg";
+    return '<button class="' + cls + '" data-item="' + esc(item.id)
+      + '" data-action="' + esc(a) + '">' + esc(ACTION_LABEL[a] || a) + "</button>";
+  }).join("");
+  const note = '<input class="note-in" id="note-' + esc(item.id)
+    + '" type="text" placeholder="note (optional)" autocomplete="off">';
+  return '<div class="actions">' + btns + note + "</div>";
+}
+
+// ---- reconciliation rendering ----
+function cellVal(doc, cell){
+  if(!cell) return '<span class="muted">&mdash;</span>';
+  const v = (cell.display !== undefined) ? cell.display
+          : (cell.value !== undefined ? cell.value : "");
+  const disp = (v === null || v === "") ? '<span class="muted">&mdash;</span>' : esc(String(v));
+  const link = cell.page ? " " + srcLink(doc, cell.page, "p." + cell.page) : "";
+  return disp + link;
+}
+function reconValuesTable(extra){
+  const rv = extra && extra.recon_values ? extra.recon_values : null;
+  if(!rv) return "";
+  const docs = Object.keys(rv);
+  if(docs.length === 0) return "";
+  const sample = rv[docs[0]];
+  const nested = sample && typeof sample === "object" && !("display" in sample) && !("value" in sample);
+  if(nested){
+    const rows = docs.map(d => '<tr><td class="doc">' + esc(d) + "</td>"
+      + '<td class="data">' + cellVal(d, rv[d].survey) + "</td>"
+      + '<td class="data">' + cellVal(d, rv[d].address) + "</td></tr>").join("");
+    return '<table class="recon"><thead><tr><th>Document</th><th>Survey / plot no.</th>'
+      + "<th>Address</th></tr></thead><tbody>" + rows + "</tbody></table>";
+  }
+  const rows = docs.map(d => '<tr><td class="doc">' + esc(d) + "</td>"
+    + '<td class="data">' + cellVal(d, rv[d]) + "</td></tr>").join("");
+  return '<table class="recon"><thead><tr><th>Document</th><th>Value</th></tr></thead><tbody>'
+    + rows + "</tbody></table>";
+}
+function conditionsBlock(extra){
+  const rows = (extra.conditions || []);
+  const total = extra.otc_total || 0;
+  const open = extra.otc_open || 0;
+  const done = Math.max(0, total - open);
+  const pct = total > 0 ? Math.round(done / total * 100) : (rows.length ? 0 : 100);
+  const cls = open > 0 ? "open" : "clear";
+  const summary = total > 0
+    ? (done + " of " + total + " OTC condition(s) evidenced &middot; " + (extra.pdd_total || 0) + " PDD")
+    : (rows.length + " condition(s) parsed, unclassified");
+  let table = "";
+  if(rows.length){
+    const trs = rows.map(c => {
+      const t = (c.type || "UNKNOWN").toUpperCase();
+      const evid = c.evidence_doc
+        ? (c.satisfied ? esc(c.evidence_doc) + " present" : esc(c.evidence_doc) + " missing")
+        : '<span class="muted">unmapped</span>';
+      const src = c.page ? " " + srcLink("sanction", c.page, "p." + c.page) : "";
+      return "<tr><td>" + esc(c.text || "") + src + "</td>"
+        + '<td><span class="typetag ' + esc(t) + '">' + esc(t) + "</span></td>"
+        + "<td>" + evid + "</td></tr>";
+    }).join("");
+    table = '<table class="recon"><thead><tr><th>Condition</th><th>Type</th>'
+      + "<th>Evidence (heuristic)</th></tr></thead><tbody>" + trs + "</tbody></table>";
+  }
+  return '<div class="meter ' + cls + '"><i style="width:' + pct + '%"></i></div>'
+    + '<div class="muted">' + summary + " &middot; mapping is heuristic, confirm manually</div>"
+    + table;
+}
+
+function reconItemHtml(item){
+  const isCond = item.extra && Array.isArray(item.extra.conditions);
+  const detail = isCond ? conditionsBlock(item.extra) : reconValuesTable(item.extra);
+  return '<div class="item" data-rowitem="' + esc(item.id) + '">'
+    + '<div class="head"><span class="idbadge">' + esc(item.id) + "</span>"
+    + pill(item.status) + lowconfFlag(item) + "</div>"
+    + '<div class="text">' + esc(item.text) + "</div>"
+    + '<div class="finding">' + esc(item.finding) + "</div>"
+    + detail
+    + decisionBlock(item)
+    + actionBlock(item)
+    + "</div>";
+}
+function triageItemHtml(item){
+  return '<div class="item" data-rowitem="' + esc(item.id) + '">'
+    + '<div class="head"><span class="idbadge">' + esc(item.id) + "</span>"
+    + '<span class="sectag">' + esc(item.section) + "</span>"
+    + pill(item.status) + lowconfFlag(item) + "</div>"
+    + '<div class="text">' + esc(item.text) + "</div>"
+    + '<div class="finding">' + esc(item.finding) + "</div>"
+    + evidenceBlock(item)
+    + decisionBlock(item)
+    + actionBlock(item)
+    + "</div>";
+}
+
+function group(items){
+  const g = { attention:[], pending:[], verified:[], na:[] };
+  items.forEach(it => {
+    const s = it.status;
+    if(s === "not_applicable") g.na.push(it);
+    else if(s === "pending_system") g.pending.push(it);
+    else if(s === "verified" && !it.needs_attention) g.verified.push(it);
+    else if(s === "verified" && it.needs_attention) g.attention.push(it);
+    else g.attention.push(it);
+  });
+  return g;
+}
+
+function collapsiblePanel(key, title, count, innerHtml, extraHeadHtml, dim){
+  const isCol = state.collapsed[key];
+  return '<section class="panel' + (isCol ? " collapsed" : "") + (dim ? " dim" : "")
+    + '" data-panel="' + key + '">'
+    + '<h2 class="toggle" data-toggle="' + key + '"><span class="caret">&#9662;</span>'
+    + esc(title) + ' <span class="count">' + count + "</span>"
+    + (extraHeadHtml ? '<span class="right">' + extraHeadHtml + "</span>" : "")
+    + "</h2><div class=\"body\">" + innerHtml + "</div></section>";
+}
+
+function render(){
+  const d = state.data;
+  if(!d){ $("main").innerHTML = '<div class="empty">No case loaded.</div>'; return; }
+  $("kbdHint").hidden = false;
+  const s = d.summary || { total:0, reviewed:0, status_counts:{} };
+  const pct = s.total ? Math.round(s.reviewed / s.total * 100) : 0;
+
+  // summary panel
+  const counts = Object.keys(s.status_counts || {}).sort().map(k =>
+    pillCount(k, s.status_counts[k])).join(" ");
+  const summaryHtml =
+    '<div class="sumrow"><div class="progress"><i style="width:' + pct + '%"></i></div>'
+    + '<div class="progress-label num">' + s.reviewed + " of " + s.total + " reviewed</div></div>"
+    + '<div class="counts" style="margin-top:9px">' + counts + "</div>";
+
+  // documents panel
+  const present = (d.documents_present || []).map(x => '<span class="chip">' + esc(x) + "</span>").join("");
+  const missing = (d.documents_missing || []).map(x => '<span class="chip miss">' + esc(x) + "</span>").join("");
+  const unknown = (d.documents_unrecognised || []).map(x => '<span class="chip unk">' + esc(x) + "</span>").join("");
+  const errs = d.extraction_errors || {};
+  const errLine = Object.keys(errs).length
+    ? '<div class="inv-line"><span class="k">Read errors</span><span class="muted">'
+      + Object.keys(errs).map(k => esc(k) + " (" + esc(errs[k]) + ")").join("; ")
+      + " &mdash; affected checks fall back to manual review</span></div>"
+    : "";
+  const docHtml =
+    '<div class="inv-line"><span class="k">Present (' + (d.documents_present||[]).length + ")</span>"
+      + '<span class="chips">' + (present || '<span class="muted">none</span>') + "</span></div>"
+    + '<div class="inv-line"><span class="k">Not in file set</span>'
+      + '<span class="chips">' + (missing || '<span class="muted">none</span>') + "</span></div>"
+    + (unknown ? '<div class="inv-line"><span class="k">Unrecognised</span><span class="chips">' + unknown + "</span></div>" : "")
+    + errLine;
+
+  // reconciliation + triage
+  const recon = (d.items || []).filter(it => (it.section || "").startsWith("R."));
+  const triage = (d.items || []).filter(it => !(it.section || "").startsWith("R."));
+  const g = group(triage);
+
+  const reconHtml = recon.length
+    ? recon.map(reconItemHtml).join("")
+    : '<div class="empty">No reconciliation checks.</div>';
+
+  const bulkBtn = g.verified.length
+    ? '<button class="act" id="bulkAccept">Accept all auto-verified (' + g.verified.length + ")</button>"
+    : "";
+
+  let html = "";
+  html += '<section class="panel"><h2>Case summary &middot; <span class="num">' + esc(d.case_id) + "</span></h2>"
+    + '<div class="body">' + summaryHtml + "</div></section>";
+  html += '<section class="panel"><h2>Documents</h2><div class="body">' + docHtml + "</div></section>";
+  html += '<section class="panel"><h2>Search this file'
+    + '<span class="right"><span id="indexStatus" class="faint">' + esc(state.indexMsg || "") + "</span></span></h2>"
+    + '<div class="body"><div class="searchrow">'
+    + '<input id="searchBox" class="note-in" type="text" '
+    + 'placeholder="Search document text (e.g. prepayment, mortgage, possession date)" '
+    + 'value="' + esc(state.searchQuery || "") + '">'
+    + '<button class="act" id="searchBtn">Search</button></div>'
+    + '<div id="searchResults" style="margin-top:10px">' + searchResultsHtml() + "</div>"
+    + "</div></section>";
+  html += '<section class="panel"><h2>Cross-document reconciliation</h2><div class="body" style="padding:0">'
+    + reconHtml + "</div></section>";
+
+  html += '<section class="panel"><h2>Needs attention <span class="count">' + g.attention.length + "</span></h2>"
+    + '<div class="body" style="padding:0">'
+    + (g.attention.length ? g.attention.map(triageItemHtml).join("") : '<div class="empty">Nothing outstanding in this group.</div>')
+    + "</div></section>";
+
+  html += collapsiblePanel("pending", "Pending system data", g.pending.length,
+    (g.pending.length ? g.pending.map(triageItemHtml).join("") : '<div class="empty">None.</div>'),
+    '<span class="faint">awaiting LOS</span>', true);
+
+  html += collapsiblePanel("verified", "Verified", g.verified.length,
+    (g.verified.length ? g.verified.map(triageItemHtml).join("") : '<div class="empty">None.</div>'),
+    bulkBtn, false);
+
+  html += collapsiblePanel("na", "Not applicable", g.na.length,
+    (g.na.length ? g.na.map(triageItemHtml).join("") : '<div class="empty">None.</div>'),
+    "", false);
+
+  $("main").innerHTML = html;
+  // reapply selection highlight
+  if(state.selectedItemId){
+    const row = document.querySelector('[data-rowitem="' + cssEscape(state.selectedItemId) + '"]');
+    if(row) row.classList.add("selected");
+  }
+}
+function cssEscape(s){ return String(s).replace(/"/g, '\\"'); }
+
+// ---- actions ----
+function flashReviewer(){
+  const el = $("reviewer"); el.classList.add("flash"); el.focus();
+  showError("Enter your reviewer name (top right) before recording a decision.");
+  setTimeout(() => el.classList.remove("flash"), 1500);
+}
+async function doAction(itemId, action){
+  if(!state.reviewer){ flashReviewer(); return; }
+  const noteEl = $("note-" + itemId);
+  const note = noteEl ? noteEl.value.trim() : "";
+  try{
+    const res = await fetchJSON("/api/cases/" + enc(state.caseId) + "/decision", {
+      method:"POST", headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ item_id:itemId, action, reviewer:state.reviewer, note: note || null }),
+    });
+    const idx = (state.data.items || []).findIndex(i => i.id === itemId);
+    if(idx >= 0) state.data.items[idx] = res.item;
+    state.data.summary = res.summary;
+    state.selectedItemId = itemId;
+    render();
+    setStatus("Recorded: " + (ACTION_LABEL[action] || action) + " on " + itemId + ".");
+  }catch(e){ showError("Could not record decision: " + e.message); }
+}
+async function bulkAccept(){
+  if(!state.reviewer){ flashReviewer(); return; }
+  try{
+    const res = await fetchJSON("/api/cases/" + enc(state.caseId) + "/accept-auto-verified", {
+      method:"POST", headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ reviewer: state.reviewer }),
+    });
+    await loadCase(state.caseId);
+    setStatus("Accepted " + (res.accepted ? res.accepted.length : 0) + " auto-verified line(s).");
+  }catch(e){ showError(e.message); }
+}
+
+// ---- evidence drawer ----
+function openDoc(docKey, page){
+  if(!state.caseId || !docKey) return;
+  let url = "/api/cases/" + enc(state.caseId) + "/document/" + enc(docKey);
+  if(page) url += "#page=" + page;
+  $("pdfFrame").src = url;
+  $("drawerTitle").textContent = docKey + (page ? " — page " + page : "");
+  $("drawerNewTab").href = url;
+  document.body.classList.add("drawer-open");
+  $("drawer").setAttribute("aria-hidden", "false");
+}
+function closeDoc(){
+  document.body.classList.remove("drawer-open");
+  $("drawer").setAttribute("aria-hidden", "true");
+  $("pdfFrame").src = "about:blank";
+}
+
+// ---- selection / keyboard ----
+function selectRow(rows, idx){
+  rows.forEach(r => r.classList.remove("selected"));
+  const row = rows[idx];
+  if(!row) return;
+  row.classList.add("selected");
+  state.selectedItemId = row.getAttribute("data-rowitem");
+  row.scrollIntoView({ block:"center", behavior:"smooth" });
+}
+function itemById(id){ return (state.data.items || []).find(i => i.id === id); }
+function quickAction(rows, idx, candidates){
+  if(idx < 0) return;
+  const id = rows[idx].getAttribute("data-rowitem");
+  const item = itemById(id);
+  if(!item) return;
+  for(const a of candidates){
+    if((item.allowed_actions || []).includes(a)){ doAction(id, a); return; }
+  }
+}
+
+// ---- event wiring (delegation) ----
+document.addEventListener("click", (e) => {
+  const src = e.target.closest(".src");
+  if(src){ e.preventDefault();
+    openDoc(src.getAttribute("data-doc"), src.getAttribute("data-page")); return; }
+  const act = e.target.closest(".act[data-action]");
+  if(act){ doAction(act.getAttribute("data-item"), act.getAttribute("data-action")); return; }
+  if(e.target.id === "bulkAccept"){ bulkAccept(); return; }
+  if(e.target.id === "searchBtn"){ doSearch(); return; }
+  const tog = e.target.closest("[data-toggle]");
+  if(tog){
+    const k = tog.getAttribute("data-toggle");
+    state.collapsed[k] = !state.collapsed[k];
+    const panel = tog.closest(".panel");
+    if(panel) panel.classList.toggle("collapsed", state.collapsed[k]);
+    return;
+  }
+});
+$("drawerClose").addEventListener("click", closeDoc);
+$("newCaseBtn").addEventListener("click", renderUpload);
+$("caseSel").addEventListener("change", (e) => loadCase(e.target.value));
+$("reviewer").addEventListener("input", (e) => {
+  state.reviewer = e.target.value.trim();
+  try{ localStorage.setItem("hl_reviewer", state.reviewer); }catch{}
+});
+document.addEventListener("keydown", (e) => {
+  const tag = (document.activeElement && document.activeElement.tagName) || "";
+  if(tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  if(e.key === "Escape"){ closeDoc(); return; }
+  if(!state.data) return;
+  const rows = Array.from(document.querySelectorAll("[data-rowitem]"));
+  if(rows.length === 0) return;
+  let idx = rows.findIndex(r => r.getAttribute("data-rowitem") === state.selectedItemId);
+  if(e.key === "j" || e.key === "ArrowDown"){ idx = (idx < 0) ? 0 : Math.min(rows.length - 1, idx + 1); selectRow(rows, idx); e.preventDefault(); }
+  else if(e.key === "k" || e.key === "ArrowUp"){ idx = (idx < 0) ? 0 : Math.max(0, idx - 1); selectRow(rows, idx); e.preventDefault(); }
+  else if(e.key === "a"){ quickAction(rows, idx, ["accept","confirm_signoff"]); }
+  else if(e.key === "d"){ quickAction(rows, idx, ["decline","confirm_issue"]); }
+  else if(e.key === "o"){
+    if(idx < 0) return;
+    const item = itemById(rows[idx].getAttribute("data-rowitem"));
+    const ev = item && (item.evidence || [])[0];
+    if(ev && ev.doc_key) openDoc(ev.doc_key, ev.page);
+  }
+});
+document.addEventListener("keydown", (e) => {
+  if(e.target && e.target.id === "searchBox" && e.key === "Enter"){
+    e.preventDefault(); doSearch();
+  }
+});
+
+init();
+</script>
+</body>
+</html>

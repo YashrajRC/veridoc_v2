@@ -1,0 +1,40 @@
+# --- Python bytecode / caches ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Test / tooling caches ---
+.pytest_cache/
+pytest-cache-files-*/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Secrets / local config ---
+.env
+.env.*
+*.pem
+*.key
+service-account*.json
+
+# --- Runtime artifacts (created by the app; see README) ---
+cache/            # extracted JSON + transcripts, keyed by file hash
+data/             # YOUR input documents (home-loan PDFs) — sensitive, not committed
+review.db         # SQLite decision/audit store
+vectors.db        # SQLite vector store
+*.db
+*.sqlite
+*.sqlite3
+
+# --- IDE / OS cruft ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

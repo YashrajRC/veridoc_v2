@@ -1,0 +1,8 @@
+# All of these are already present in the Vertex AI Workbench image.
+# Listed for reproducibility on other machines / a fresh kernel or venv.
+fastapi
+uvicorn
+google-genai
+pydantic
+python-multipart
+numpy
