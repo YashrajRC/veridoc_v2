@@ -259,14 +259,21 @@ function setStatus(msg, isErr){
 }
 function showError(msg){ setStatus(msg, true); }
 
-// On Vertex AI Workbench the app is served behind the Jupyter proxy under a path
-// prefix (e.g. /proxy/8080/). An absolute URL like "/api/..." would bypass that
-// prefix and hit the Jupyter server itself, which rejects POSTs with
-// "403 '_xsrf' argument missing". Resolve API paths relative to the folder this
-// page is served from so requests reach our app whether proxied or direct.
+// On Vertex AI Workbench the app is served behind jupyter-server-proxy at a path
+// like /proxy/<port>/. An absolute URL ("/api/...") would bypass that mount and
+// hit the Jupyter server itself (empty GETs, "403 '_xsrf' missing" on POSTs), so
+// every request must be anchored to the proxy mount. The page URL can arrive
+// without a trailing slash (".../proxy/8085"), so we can't just take the path's
+// "directory" — detect the /proxy/<port> mount explicitly, and fall back to the
+// page directory when running directly (no proxy).
 function apiUrl(path){
-  const base = location.pathname.replace(/[^/]*$/, "");  // page dir, ends with "/"
-  return base + String(path).replace(/^\//, "");
+  const rel = String(path).replace(/^\//, "");
+  const m = location.pathname.match(/^(.*?\/proxy\/[^/]+)(?:\/|$)/);
+  if(m) return m[1] + "/" + rel;
+  const base = location.pathname.endsWith("/")
+    ? location.pathname
+    : location.pathname.replace(/[^/]*$/, "");
+  return base + rel;
 }
 
 // Jupyter / jupyter-server-proxy guards POST/PUT/DELETE with an XSRF token, even
