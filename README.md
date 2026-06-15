@@ -13,7 +13,8 @@ HTML file.
 **Docs:** [finance.md](finance.md) explains *what* each check means for a zero-finance
 reader; [logic.md](logic.md) traces *how* the code decides; [improvement.md](improvement.md)
 lists in-scope upgrades; [agentic_ai.md](agentic_ai.md) teaches agentic AI and the
-Phase-2 framework options.
+framework options; [roadmap.md](roadmap.md) is the detailed phase-by-phase plan
+(what each future phase builds, taught from scratch, with how to present it).
 
 **In this build:** beyond presence/sign-off/reconciliation, the tool now also
 (1) checks **interest rate and fees against the lender's published pricing grid**
