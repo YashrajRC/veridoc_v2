@@ -86,6 +86,10 @@ line — the prompt asks for *every* field that document can supply.
   of the same bytes never re‑bills Gemini. The cache is content‑pure; the physical
   `source` doc_id is stamped onto fields *after* cache read/write so the same bytes
   placed under two ids share a cache entry but keep correct provenance.
+  **Auto‑invalidation**: a cache entry is treated as **stale and re‑extracted** when
+  the current field spec (`DOC_FIELDS`) has keys the cached entry lacks — so when new
+  fields are added (e.g. the KYC or fee fields) the new checks populate on the next
+  run instead of silently reading empty values from an old extraction. See §13.
 
 `ExtractedField` = `{value, page, snippet, confidence, source}`. `source` is the
 doc_id the value came from — this is what makes a multi‑doc evidence link open the
@@ -146,7 +150,7 @@ to a human; auto‑pass only the unambiguous.**
 | `sanction_present` | Sanctioned amount present → **VERIFIED**; else MANUAL_REVIEW. |
 | `insurance_present` | Sum assured present → **VERIFIED**; else MANUAL_REVIEW. |
 | `insurance_bank_interest` | "Bank's interest noted" flag truthy → **VERIFIED**. |
-| `kyc_verification` (**A6**) | Reads the **KYC results recorded in the RCU report** — `aadhaar_result`, `pan_result`, `bank_statement_result`. Any explicit *not matched / inoperative / failed* → **EXCEPTION**; all clear → **VERIFIED** (listing each result); none found → **MANUAL_REVIEW**. Surfaces the actual verification, not just "report present." |
+| `kyc_verification` (**A6**) | Reads the **KYC detail recorded in the RCU report** — `aadhaar_result`, `pan_result`, `bank_statement_result`, and a `kyc_documents` list. KYC counts as **present** if *any* of these has a value (a status like "OPERATIVE/VALID", a result like "matched", a masked Aadhaar number, or a documents list) — the report rarely uses one fixed wording, so the rule is **presence‑based**, not keyword‑exact. An explicit negative (`not matched`, `inoperative`, `invalid`, `failed`, `refer`…) → **EXCEPTION**; any detail present and no negative → **VERIFIED** (listing what was found); **nothing at all** → **MANUAL_REVIEW** — which usually means the cached extraction predates these fields, so the message says to re‑run `warm.py`. Surfaces the actual verification, not just "report present." |
 
 Evidence for an `AUTO_DOC` line is the rule's **primary field** (`_PRIMARY_FIELD`),
 so the line links straight to the page/quote that drove the verdict.
@@ -307,6 +311,108 @@ DOCUMENT_MISSING, and the app still boots and serves the checklist honestly
 (`GEMINI_AVAILABLE` guard in [extraction.py](extraction.py)). Oversized files are
 reported explicitly rather than truncated. Concurrency is bounded by a semaphore
 (`MAX_CONCURRENCY`) and each call has a wall‑clock timeout.
+
+## 13. The caching model — why a document is (or isn't) re‑read
+
+This trips people up, so it's worth its own section. **Reading a PDF with Gemini is
+the slow, paid step**; everything else is fast local Python. So we cache the result
+of reading.
+
+- **What is cached, and by what key.** Two things, both under `cache/` at the project
+  root: the **extracted fields** as `cache/<sha256>.json`, and the plain‑text
+  **transcript** (for search) as `cache/<sha256>.txt`. The key is the **SHA‑256 of
+  the file's bytes** — *not* the filename. So the same PDF re‑uploaded under a
+  different name reuses the cache, and two different files never collide.
+- **Why content‑keyed.** It means a pre‑warm and the live view share one cache, and
+  re‑running never re‑bills for bytes already read.
+- **The gotcha you just hit (and its fix).** Because the cache stores *the fields that
+  existed when it was written*, adding a **new field** to the spec (the KYC fields on
+  the RCU, the fee fields on the sanction letter) would otherwise leave old cache
+  entries without those fields — so the new check reads *empty* and reports "not
+  found," even though the document clearly shows the data. The fix (§3) is
+  **auto‑invalidation**: `_read_cache` compares the cached entry's field names to the
+  current `DOC_FIELDS` spec, and if the spec has keys the entry lacks, it **discards
+  the entry and re‑extracts**. Net effect: after a code change that adds fields, the
+  affected documents are re‑read **once**, automatically, on the next case load — no
+  manual cache‑clearing, no stale empties.
+- **Forcing a full refresh anyway.** `warm.py` and `evaluate_case` accept
+  `use_cache`; the index builder takes `force`. To rebuild everything from scratch you
+  can also delete `cache/` (it is regenerated). A *failed* extraction is cached too,
+  but is kept as‑is by `_read_cache` (re‑trying it is the caller's choice).
+
+**One‑line mental model:** *we re‑read a document only when its bytes change or when
+we start asking it for something new.*
+
+## 14. A worked example — one case, end to end
+
+Follow a real‑shaped case (the borrower "Syed Moinul Haque", a ₹26,00,000 home loan)
+from upload to a reviewed checklist. Each step names the function doing the work.
+
+1. **Upload / placement.** The reviewer drops nine PDFs via "New case", or they are
+   pre‑placed under `data/<case_id>/`. On upload each file is first **classified**
+   (`classify_pdf_sync`) so its type is pre‑filled; on disk it lands as
+   `sanction.pdf`, `legal.pdf`, … A second loan agreement would be `loan_agreement__2.pdf`.
+
+2. **Discovery** (`discover_documents`). The folder is scanned; filenames map to
+   types via `FILENAME_ALIASES`; each physical file gets a **doc_id** (`sanction`,
+   `loan_agreement`, `loan_agreement__2`). Unrecognised files are listed, not guessed.
+
+3. **Extraction** (`extract_documents` → `extract_document`, fanned out, bounded by a
+   semaphore). For each document Gemini is asked, in **one call**, for that type's
+   field spec. The sanction letter returns `sanctioned_amount = "Rs. 2600000.00"
+   (p.1)`, `roi = "8.35%" (p.1)`, `processing_fee`, `login_fee`, and the
+   `conditions` list; the technical report returns `market_value = "One Crore Four
+   Lakh … Rupees Only" (p.3)` and `survey_or_plot_no = "613/49, 613/154"`; the RCU
+   returns `aadhaar_result`, `pan_result`, … Each value carries its **page, a verbatim
+   snippet, and a confidence**; anything unclear comes back `null/low` (never
+   guessed). Results are cached by content (§13).
+
+4. **Merge** (`merge_extractions`). For types with one document this is a pass‑through;
+   for a type with two (the loan agreements) the fields are combined — a value is
+   "found" if either supplies it, highest confidence wins — so downstream rules see
+   **one** extraction per type while each value keeps its own source doc_id.
+
+5. **Evaluate every checklist line** (`_evaluate_item`), dispatching on the line's
+   mode. A few concrete lines from this case:
+   - **A6 (KYC)** — `AUTO_DOC` over the RCU: reads `aadhaar_result`/`pan_result`/… If
+     the RCU shows "Aadhaar: OPERATIVE; PAN: VALID" → **Verified**, listing them; an
+     explicit "not matched" → **Exception**; nothing parsed → **Manual review** (and,
+     thanks to §13, the RCU is re‑read once after this field was added so it does get
+     parsed).
+   - **R1 (name)** — `AUTO_RECON`: builds the applicant **core** "SYED MOINUL HAQUE"
+     from the names that recur, tolerates "Haqull"/honorifics/initials, notes "Zahida"
+     as a **co‑applicant**, and returns **Verified** with each document's % match.
+   - **R2 (property)** — compares survey **number sets**: `{613/49, 613/154}` appears
+     in both technical and legal → **Verified**.
+   - **R4 (LTV)** — parses the valuation **from words** → ₹1,04,10,480, computes
+     `26,00,000 ÷ 1,04,10,480 = 25.0%`, under the 90% trigger → **Verified**, showing
+     the calculation.
+   - **P1 (ROI)** — slots ₹26L into the "0–50L" band, shows the published window
+     (Salaried 7.95–8.90%, SEP 8.30–9.20%, floor 7.75%); 8.35% is inside → **Verified**
+     (low confidence: confirm the CIBIL band), with the per‑band grid as proof.
+   - **B5 / I1 / I3 (sign‑offs)** — the AI locates the advocate/borrower/notary marks
+     and returns **Needs sign‑off** for a human to authenticate.
+   - **F1 / H1 / J1 (system)** — **Pending system data** until LOS is connected.
+
+6. **Pack & triage** (`_pack`, then sort). Each line gets its status, evidence, the
+   valid reviewer actions, and a **rank**; a *low‑confidence* "verified" is pushed up
+   into Needs‑attention because an unsure green tick is the dangerous case. The whole
+   list is sorted exception‑first.
+
+7. **Assemble the response** (`evaluate_case`) — checklist + recorded decisions +
+   `status_counts` + document inventory + extraction errors → JSON the console renders
+   as the Policy, Reconciliation, Needs‑attention, Verified and (collapsed) Sanction‑
+   conditions panels.
+
+8. **Human review** (`POST …/decision`). The reviewer clicks through the flagged lines
+   first, opening each value's page to confirm it. Every decision is re‑validated
+   against the line's current status and **appended** to the audit trail with a
+   snapshot of the AI verdict at that moment. Re‑deciding appends a new row; nothing is
+   overwritten.
+
+That is the whole loop: **discover → read (cached) → merge → judge each line by its
+mode → triage → a human signs off, audited.** The AI only ever *reads and proposes*;
+the rules and the human decide.
 
 ---
 

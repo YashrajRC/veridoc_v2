@@ -105,9 +105,10 @@ DOC_FIELDS: dict[str, dict[str, str]] = {
     "rcu": {
         "applicant_name": "name of the applicant screened",
         "verdict": "the RCU verdict (e.g. positive / negative / refer)",
-        "aadhaar_result": "result of Aadhaar/UIDAI verification if present (e.g. matched / verified / operative / seeded), as written",
-        "pan_result": "result of PAN verification if present (e.g. valid / matched / operative), as written",
+        "aadhaar_result": "ANY Aadhaar/UIDAI detail shown — the status / seeding status / verification result (e.g. OPERATIVE, seeded, verified, matched) OR the (masked) Aadhaar number if one is printed. Quote it as written.",
+        "pan_result": "ANY PAN detail shown — the PAN status / type / verification result (e.g. VALID, active, operative, matched) OR the PAN itself if printed. Quote it as written.",
         "bank_statement_result": "result of bank statement / bank account verification if present, as written",
+        "kyc_documents": "which KYC/identity documents were submitted or checked (e.g. Aadhaar card, PAN card, bank statement, masked Aadhaar copy)",
         "remarks": "any adverse remark, else state none",
     },
     "fi": {
@@ -361,7 +362,18 @@ def _read_cache(file_hash: str, doc_key: str) -> Optional[DocumentExtraction]:
         d = json.loads(p.read_text(encoding="utf-8"))
         de = DocumentExtraction.from_dict(d)
         # Only trust the cache if it is for this doc type.
-        return de if de.doc_key == doc_key else None
+        if de.doc_key != doc_key:
+            return None
+        # Auto-invalidate a cache written before new fields were added to the
+        # spec (e.g. the KYC or fee fields): if the current field spec has keys
+        # this cached extraction lacks, treat it as stale and re-extract, so the
+        # added checks are populated instead of reading empty values. (A failed
+        # extraction is kept as-is; re-trying it is the caller's concern.)
+        if de.ok:
+            spec = set(DOC_FIELDS.get(doc_key, {}))
+            if not spec.issubset(de.fields.keys()):
+                return None
+        return de
     except Exception:
         return None  # corrupt cache -> re-extract
 

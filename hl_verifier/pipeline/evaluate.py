@@ -108,31 +108,47 @@ def _rule_fi_office(de):
     return (VerificationStatus.VERIFIED, f"Office FI: {ef.value}.", ef.confidence)
 
 
+# Tokens that mark a KYC line as failed. Multi-word negatives ("not matched")
+# are checked as phrases so a bare "matched" is not misread as a failure.
+_KYC_BAD = ("not match", "mismatch", "not verif", "not seed", "not found",
+            "negative", "fail", "invalid", "inoperative", "discrep", "absent",
+            "missing", "rejected", "refer")
+
+
 def _rule_kyc_verification(de):
-    """Surface the actual KYC verification results recorded in the RCU report
-    (Aadhaar / PAN / bank statement) rather than merely asserting the report
-    exists. Any explicit non-match is an exception; all-clear is verified; no
-    results found routes to a human."""
-    checks = [("aadhaar_result", "Aadhaar"), ("pan_result", "PAN"),
+    """Surface the actual KYC verification recorded in the RCU report (Aadhaar /
+    PAN / bank statement) rather than merely asserting the report exists. KYC is
+    treated as 'present' if ANY identity detail is shown (a status, a result, a
+    masked number, or a list of documents checked) — the report rarely uses one
+    fixed wording. An explicit negative is an exception; otherwise verified;
+    nothing found at all routes to a human (and usually means the cached
+    extraction predates these fields — re-run warm.py)."""
+    fields = [("aadhaar_result", "Aadhaar"), ("pan_result", "PAN"),
               ("bank_statement_result", "Bank statement")]
     parts, found, bad = [], False, False
-    for fname, label in checks:
+    for fname, label in fields:
         ef = de.get(fname)
-        if ef.value is None:
+        v = ef.value
+        if v is None or str(v).strip() == "":
             continue
         found = True
-        v = str(ef.value)
-        parts.append(f"{label}: {v}")
-        if any(w in v.lower() for w in ("not match", "mismatch", "negative", "fail",
-                                        "invalid", "not verified", "not found",
-                                        "discrep", "inoperative")):
+        s = str(v).strip()
+        parts.append(f"{label}: {s}")
+        if any(w in s.lower() for w in _KYC_BAD):
             bad = True
+    docs_ef = de.get("kyc_documents")
+    if docs_ef.value not in (None, "") and str(docs_ef.value).strip():
+        found = True
+        parts.append(f"Documents: {docs_ef.value}")
     if not found:
         return (VerificationStatus.MANUAL_REVIEW,
-                "KYC verification (Aadhaar/PAN/bank) not found in RCU; verify.", "low")
+                "KYC details (Aadhaar/PAN/bank) not parsed from RCU; if the report "
+                "shows them, re-run extraction (warm.py) — the cache may predate "
+                "these fields.", "low")
     detail = "; ".join(parts)
     if bad:
-        return (VerificationStatus.EXCEPTION, f"KYC verification flagged — {detail}.", "medium")
+        return (VerificationStatus.EXCEPTION,
+                f"KYC verification flagged — {detail}.", "medium")
     return (VerificationStatus.VERIFIED, f"KYC verified in RCU — {detail}.", "medium")
 
 
