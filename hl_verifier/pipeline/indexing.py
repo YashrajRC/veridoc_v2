@@ -96,7 +96,14 @@ async def build_index(case_id: str, force: bool = False) -> dict:
         return {"indexed": 0, "skipped": False,
                 "error": "embeddings unavailable", "errors": errors}
 
-    rows = [{**p, "vec": v} for p, v in zip(passages, vecs)]
+    rows = [{**p, "vec": v} for p, v in zip(passages, vecs) if v and len(v) > 0]
+    if not rows:
+        # Embeddings came back empty/degraded (right count, no usable values).
+        # Do NOT clear the existing index — keep whatever is already there rather
+        # than wiping search to empty. Re-run once embeddings are healthy.
+        return {"indexed": vectorstore.count(case_id), "skipped": False,
+                "error": "embeddings returned no usable vectors; kept existing index",
+                "errors": errors}
     vectorstore.clear_case(case_id)
     n = vectorstore.add_passages(case_id, rows)
     return {"indexed": n, "skipped": False, "errors": errors}

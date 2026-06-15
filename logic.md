@@ -414,6 +414,144 @@ That is the whole loop: **discover → read (cached) → merge → judge each li
 mode → triage → a human signs off, audited.** The AI only ever *reads and proposes*;
 the rules and the human decide.
 
+## 15. The Gemini calls in detail — prompts, output contract, parsing
+
+Every model call goes through **one** function, `_gen(parts, json_mode)` in
+[extraction.py](extraction.py), so the SDK is touched in exactly one place. It sends
+`contents = [Part.from_bytes(pdf_bytes, "application/pdf"), prompt]` with
+`temperature = 0.0` (we want determinism, not creativity) and, in JSON mode,
+`response_mime_type = "application/json"` so the model is told to emit JSON. It
+returns `resp.text`; if there is **no text part** (a safety block or empty
+candidate) it raises `RuntimeError("no text in response (finish_reason=…)")` — which
+the caller catches and turns into a failed extraction, never a crash.
+
+There are **four** distinct prompts/calls. All are verbatim from the code.
+
+**(a) Extraction** — `_build_prompt(doc_key)` = a fixed header + the per‑type field
+list + (for the sanction letter) a `conditions` addendum. The header *is* the output
+contract and the "never guess" safety rule:
+
+```
+You are extracting fields from a single lending document for an audit trail. The
+document is a SCANNED PDF and may be medium or low quality, skewed, or partly faint.
+Read carefully. Where text is unclear or illegible, do not guess: set the value to
+null and confidence to low. Return ONLY a JSON object, no prose and no markdown
+fences. For each requested field output an object with keys: value, page, snippet,
+confidence. 'value' is the extracted value exactly as written (or null if absent or
+illegible). 'page' is the 1-based page number you read it from (or null). 'snippet'
+is a short verbatim quote from the document supporting the value (or empty string).
+'confidence' is one of low, medium, high; use low whenever the scan quality made you
+unsure. Keep snippets under 20 words.
+
+Fields:
+- <field>: <hint>        # one line per field in DOC_FIELDS[doc_key]
+...
+```
+
+The field lines come straight from `DOC_FIELDS` (so adding a check is a one‑line
+hint, e.g. the KYC and fee fields). For the sanction letter an addendum asks for
+`conditions` as a JSON **array** of `{text, type∈{OTC,PDD,UNKNOWN}, page, snippet}`.
+Key design point: **one call per document for every field** (not one call per
+checklist line) — cheaper, and the model sees the whole document at once.
+
+**(b) Classification** — `classify_pdf_sync`, used by upload so the reviewer needn't
+know the type. It lists the `DOC_KEYS` catalogue and demands strict JSON:
+
+```
+You are classifying a single document from an Indian home-loan file. From its
+content (title, headings, fields, stamps) decide which ONE of these document types
+it is:
+- technical: Technical / valuation report
+- legal: Legal & search report (TSR/LSR)
+- ... (one line per DOC_KEYS entry)
+
+Respond ONLY as JSON: {"doc_key": <one key from the list above, or "unknown" if it
+matches none>, "confidence": "high"|"medium"|"low", "reason": <short phrase citing
+what you saw>}. If you are not sure, use "unknown" with low confidence rather than
+guessing.
+```
+
+It is **fail‑safe**: any exception, or a `doc_key` outside the catalogue, degrades to
+`{"unknown", "low"}` so the human simply picks.
+
+**(c) Transcription** — `transcribe_sync`, used only for the search index. Plain text
+is more robust than JSON for long OCR, so it is *not* JSON mode:
+
+```
+Transcribe this scanned document to plain text. Preserve reading order. Begin each
+page with a line '=== PAGE n ===' (n is the 1-based page number). Output only the
+transcription, no commentary.
+```
+
+The `=== PAGE n ===` markers are what `indexing._parse_pages` later splits on to keep
+each chunk's page number for the evidence link.
+
+**(d) Embeddings** — `embed_texts`, batched at 50 inputs, returns one vector per text
+or **`None`** on any failure (so search silently falls back to keyword‑only).
+
+**Parsing the JSON back.** `_coerce_json` is forgiving: it strips a ```` ```json ````
+fence if present, tries `json.loads`, and if that fails grabs the **outermost
+`{ … }` span** and tries again; only then gives up (`None`). Each field is then read
+by `ExtractedField.from_obj`, which **sanitises** every value: `page` is coerced to an
+int ≥ 1 or `None` (a bool or 0 becomes `None`); `confidence` is forced into
+`{low, medium, high}`, defaulting to `low`; `snippet` is stringified and capped at
+300 chars; a missing field becomes an empty `ExtractedField` (value `None`). So a
+malformed or partial model response can never inject a bad type downstream — worst
+case a field is simply "not found," which routes to a human.
+
+## 16. The fallback ladders — every place the system degrades safely
+
+The recurring principle: **when in doubt, route to a human; auto‑pass only the
+unambiguous.** Here is every decision point and the ladder it walks.
+
+**Reading a document (`extract_document`).** cache hit (and fresh) → return it ·
+else if Gemini unavailable → `ok=False` "Gemini unavailable" · else call Gemini with
+a wall‑clock **timeout** (`GEMINI_TIMEOUT_S`); on timeout or error, **retry** up to
+`GEMINI_MAX_RETRIES` with `1.5×(attempt+1)s` backoff · unparseable JSON →
+"model did not return parseable JSON" and retry · all attempts exhausted →
+`ok=False` with the last error. A failed read is **data**, not an exception.
+
+**The cache (`_read_cache`, §13).** absent → extract · wrong `doc_key` → ignore →
+extract · **stale** (current spec has fields the entry lacks) → re‑extract · corrupt
+JSON → re‑extract · a cached *failed* read → kept as‑is.
+
+**Per checklist mode (`_evaluate_item`).** `AUTO_DOC`: type absent →
+**DOCUMENT_MISSING**; present but `ok=False` → **MANUAL_REVIEW** ("could not read …");
+rule id unknown → **MANUAL_REVIEW**. `SIGNOFF`: absent → **DOCUMENT_MISSING**;
+unreadable → **NEEDS_SIGNOFF** (a human must still look). `AUTO_RECON` / `AUTO_POLICY`:
+a required document missing → **DOCUMENT_MISSING**; a value unparseable →
+**MANUAL_REVIEW**. `CONDITIONAL`: attribute false → **NOT_APPLICABLE**, else the inner
+mode. `SYSTEM` → **PENDING_SYSTEM_DATA**. `MANUAL` → **MANUAL_REVIEW**.
+
+**Amounts (`parse_amount`).** already numeric → use it · else first **digit group**
+`\d[\d,]*\.?\d*` (with the lakh/crore multiplier heuristic, and the "words restate the
+figure" guard) · else the **words parser** (`_words_to_number`: "One Crore Four
+Lakh …") · else `None` → the caller routes to a human.
+
+**Names (`names_match` / `recon_borrower_name`).** per token: exact → **initial**
+(`A` ≈ `Anil`) → **fuzzy** (difflib ratio ≥ `NAME_TOKEN_FUZZ`, so `HAQUE` ≈ `HAQULL`).
+For R1: build the applicant **core** from the most‑frequent tokens (so a co‑applicant
+isn't mistaken for the applicant), then require each document's coverage ≥
+`NAME_CORE_COVERAGE`; below that → exception. No recurring core at all → MANUAL_REVIEW.
+
+**Property (`recon_property_identity`).** survey **number sets** intersect → match ·
+no common number → exception · no surveys at all → **address** word‑overlap, flagged
+only below `ADDRESS_SIM_FLOOR` · neither available → MANUAL_REVIEW.
+
+**KYC (`_rule_kyc_verification`, §6).** any KYC detail present (status / result /
+masked number / documents list) and no negative token → **VERIFIED** · an explicit
+negative → **EXCEPTION** · nothing parsed → **MANUAL_REVIEW** (with the re‑warm hint,
+since it usually means a stale cache — now auto‑handled by §13).
+
+**Search (`indexing.search`, §11).** keyword tier first (exact → partial), best
+keyword score on top · then semantic matches (related) for recall · if embeddings are
+`None`, **keyword‑only** mode (`mode:"keyword"`) · no matches → empty list. Search
+failure never touches verification.
+
+**The confidence gate (`_pack`).** a `VERIFIED` line with `confidence == "low"` is
+marked `needs_attention` and floated into the review queue — an unsure green tick is
+treated as more dangerous than an honest flag.
+
 ---
 
 ## File map

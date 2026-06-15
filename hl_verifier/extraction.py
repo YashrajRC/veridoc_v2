@@ -344,8 +344,13 @@ def embed_texts(texts: list[str]) -> Optional[list[list[float]]]:
                 model=config.EMBED_MODEL, contents=texts[i:i + batch])
             embs = getattr(resp, "embeddings", None) or []
             for e in embs:
-                out.append([float(x) for x in e.values])
-        return out if len(out) == len(texts) else None
+                out.append([float(x) for x in (getattr(e, "values", None) or [])])
+        # Treat a degraded response (wrong count, or any empty vector) as a clean
+        # failure: returning a list padded with empty vectors would later be
+        # silently dropped by the vector store and could empty the search index.
+        if len(out) != len(texts) or any(len(v) == 0 for v in out):
+            return None
+        return out
     except Exception:
         return None
 
