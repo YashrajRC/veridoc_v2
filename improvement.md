@@ -30,6 +30,12 @@ These items from below are now **done** and live in the code:
   "report present."
 - **Search** — rebuilt as keyword‑first hybrid (exact matches lead; semantic recall
   underneath; works even without embeddings).
+- **Grounded assistant (Tier‑1 RAG)** — `pipeline/assistant.py` + `POST …/ask` +
+  an "Ask about this file" panel. Answers free‑text questions ("compare the
+  sanction amount across the documents") from retrieved passages **and** the
+  verified findings/reconciliation values, with cited evidence; read‑only, no
+  new dependencies. Natural next step: **Tier‑2** = let Gemini call tools
+  (search / get_field / get_reconciliation) for multi‑step questions.
 - **Modular package + teaching doc** — code reorganised under `hl_verifier/`; the
   agentic‑framework options are taught and weighed in [agentic_ai.md](agentic_ai.md)
   for a Phase‑2 decision.

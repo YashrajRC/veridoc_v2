@@ -61,7 +61,33 @@ def _chunk(text: str, size: int = 700, overlap: int = 100) -> list[str]:
     return chunks
 
 
+# Collapse concurrent build requests for the same case onto a single task. The
+# frontend auto-indexes on case open and a user may retry, so several POST /index
+# calls can arrive together; without this each would run the full (slow)
+# transcription pass at once and race on clear_case/add_passages. The shared task
+# is also shielded from the caller, so a dropped/cancelled request lets the build
+# finish and populate the index instead of abandoning it half-done.
+_INFLIGHT: dict[str, "asyncio.Task"] = {}
+
+
 async def build_index(case_id: str, force: bool = False) -> dict:
+    task = _INFLIGHT.get(case_id)
+    if task is None or task.done():
+        task = asyncio.ensure_future(_build_index_impl(case_id, force))
+        _INFLIGHT[case_id] = task
+
+        def _done(t: "asyncio.Task", _cid: str = case_id) -> None:
+            if _INFLIGHT.get(_cid) is t:
+                _INFLIGHT.pop(_cid, None)
+
+        task.add_done_callback(_done)
+    # A second concurrent caller for the same case awaits the in-flight build
+    # (its `force` is honoured by that build); shield keeps the build alive even
+    # if this request is cancelled.
+    return await asyncio.shield(task)
+
+
+async def _build_index_impl(case_id: str, force: bool = False) -> dict:
     existing = vectorstore.count(case_id)
     if not force and existing > 0:
         return {"indexed": existing, "skipped": True, "errors": {}}

@@ -303,6 +303,30 @@ paraphrase recall. This guarantees exact word matches lead, and it still works (
 keyword‑only, `mode: "keyword"`) when embeddings are unavailable. A failure here
 yields an empty/partial index and **never** affects verification.
 
+## 11b. The grounded assistant (Tier‑1 RAG) — `pipeline/assistant.py`
+
+A read‑only Q&A layer on top of search. For a natural‑language question about one
+case (`POST /api/cases/{id}/ask`) it does three things, then asks Gemini once:
+
+1. **Retrieve** the top passages via `indexing.search` (the document text).
+2. **Read the verified facts** via `evaluate_case` (cache‑backed, so it adds no
+   new model calls when the case is already extracted): every checklist
+   **finding** plus the **reconciliation values** — i.e. the already‑computed
+   cross‑document comparisons (`sanction=… , loan_agreement=…`). This is the half
+   that makes *“compare the sanction amount across the documents”* reliable: the
+   numbers come from the verification engine, not re‑read from OCR.
+3. **Answer** with `extraction._gen` under a strict contract: use ONLY the
+   supplied context, quote figures exactly, **cite document + page**, and say
+   *“I couldn't find that in this case's documents”* rather than guess. The
+   response carries `answer`, deduplicated `sources` (clickable evidence links),
+   the `passages` used, and `used_facts`.
+
+It is **purely additive and never mutates verification**. It degrades safely:
+answers from the structured findings even when the **search index is empty**, and
+returns a clear message (not a 500) when Gemini is unavailable. Two model calls
+per question (one query embedding + one generation); the heavy extraction is
+served from cache.
+
 ## 12. Robustness & degradation
 
 The whole pipeline is built to **degrade, not crash**: if Gemini is unavailable,

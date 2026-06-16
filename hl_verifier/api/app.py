@@ -28,6 +28,7 @@ from pydantic import BaseModel
 from hl_verifier import config
 from hl_verifier import extraction
 from hl_verifier.pipeline import indexing
+from hl_verifier.pipeline import assistant
 from hl_verifier.storage import store
 from hl_verifier.storage import vectorstore
 from hl_verifier.pipeline.evaluate import (discover_documents, evaluate_case,
@@ -61,6 +62,11 @@ class DecisionIn(BaseModel):
 
 class BulkIn(BaseModel):
     reviewer: str
+
+
+class AskIn(BaseModel):
+    question: str
+    k: int = 6
 
 
 # --- Helpers ----------------------------------------------------------------
@@ -297,3 +303,15 @@ async def search_case(case_id: str, q: str = "", k: int = 8):
     if not q.strip():
         return {"results": [], "indexed": vectorstore.count(case_id)}
     return await indexing.search(case_id, q.strip(), k=max(1, min(k, 25)))
+
+
+@app.post("/api/cases/{case_id}/ask")
+async def ask_case(case_id: str, body: AskIn):
+    """Grounded Q&A: answer a natural-language question about the case using its
+    retrieved passages + already-verified findings. Read-only; never mutates the
+    verification logic."""
+    _require_case(case_id)
+    q = (body.question or "").strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="question is required")
+    return await assistant.ask(case_id, q, k=max(1, min(body.k, 12)))

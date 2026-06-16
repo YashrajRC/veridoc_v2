@@ -207,6 +207,8 @@
   .sr:first-child{border-top:none}
   .sr .srhead{display:flex; align-items:center; gap:8px; margin-bottom:2px}
   .sr .srtext{color:var(--muted); font-size:12.5px}
+  .askanswer{white-space:normal; line-height:1.5; font-size:13.5px}
+  .asksrc{margin-top:8px; font-size:12px; color:var(--faint)}
 
   @media (max-width:900px){
     body.drawer-open main{margin-right:0}
@@ -259,6 +261,7 @@ const state = {
   collapsed: { pending: true, verified: true, na: true, r6: true },
   mode: "review", docTypes: [], uploadFiles: [], assign: {},
   searchQuery: "", searchResults: null, searchMode: "", indexMsg: "",
+  askQuery: "", askResult: null, askBusy: false,
 };
 
 const STATUS_LABEL = {
@@ -362,6 +365,7 @@ async function loadCase(caseId){
     $("kbdHint").hidden = true; return; }
   state.caseId = caseId; state.selectedItemId = null; state.mode = "review";
   state.searchQuery = ""; state.searchResults = null; state.indexMsg = "";
+  state.askQuery = ""; state.askResult = null; state.askBusy = false;
   setStatus("Loading " + caseId + "…");
   try{
     state.data = await fetchJSON("/api/cases/" + enc(caseId));
@@ -593,6 +597,46 @@ async function doSearch(){
     if(el) el.innerHTML = '<div style="color:var(--ex-ink)">Search failed: '
       + esc(e.message) + "</div>";
   }
+}
+
+// ---- ask (grounded Q&A) ----
+function askResultHtml(){
+  if(state.askBusy) return '<div class="muted">Thinking…</div>';
+  const a = state.askResult;
+  if(a === null) return "";
+  if(a.error) return '<div style="color:var(--ex-ink)">' + esc(a.error) + "</div>";
+  let html = '<div class="askanswer">' + esc(a.answer || "").replace(/\n/g, "<br>") + "</div>";
+  const srcs = a.sources || [];
+  if(srcs.length){
+    html += '<div class="asksrc">Sources: ' + srcs.map(s =>
+      s.page ? srcLink(s.doc_key, s.page, s.label + " p." + s.page)
+             : '<span class="mono">' + esc(s.label) + "</span>"
+    ).join(" · ") + "</div>";
+  }
+  return html;
+}
+function updateAskResult(){
+  const el = $("askResult");
+  if(el) el.innerHTML = askResultHtml();
+}
+async function doAsk(){
+  const box = $("askBox");
+  const q = box ? box.value.trim() : "";
+  const caseId = state.caseId;
+  state.askQuery = q;
+  if(!q){ state.askResult = null; updateAskResult(); return; }
+  state.askBusy = true; updateAskResult();
+  try{
+    const r = await fetchJSON("/api/cases/" + enc(caseId) + "/ask",
+      { method:"POST", headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({ question: q }) });
+    if(caseId !== state.caseId) return;  // user moved on; drop stale answer
+    state.askResult = r;
+  }catch(e){
+    if(caseId !== state.caseId) return;
+    state.askResult = { error: "Ask failed: " + e.message };
+  }
+  state.askBusy = false; updateAskResult();
 }
 
 // ---- rendering helpers ----
@@ -882,6 +926,15 @@ function render(){
     + '<button class="act" id="searchBtn">Search</button></div>'
     + '<div id="searchResults" style="margin-top:10px">' + searchResultsHtml() + "</div>"
     + "</div></section>";
+  html += '<section class="panel"><h2>Ask about this file'
+    + '<span class="right faint">grounded in this case’s documents &amp; verified findings</span></h2>'
+    + '<div class="body"><div class="searchrow">'
+    + '<input id="askBox" class="note-in" type="text" '
+    + 'placeholder="Ask a question (e.g. compare the sanction amount across the documents)" '
+    + 'value="' + esc(state.askQuery || "") + '">'
+    + '<button class="act" id="askBtn">Ask</button></div>'
+    + '<div id="askResult" style="margin-top:10px">' + askResultHtml() + "</div>"
+    + "</div></section>";
 
   if(policy.length){
     html += '<section class="panel"><h2>Policy compliance &middot; pricing'
@@ -1006,6 +1059,7 @@ document.addEventListener("click", (e) => {
   if(act){ doAction(act.getAttribute("data-item"), act.getAttribute("data-action")); return; }
   if(e.target.id === "bulkAccept"){ bulkAccept(); return; }
   if(e.target.id === "searchBtn"){ doSearch(); return; }
+  if(e.target.id === "askBtn"){ doAsk(); return; }
   const tog = e.target.closest("[data-toggle]");
   if(tog){
     const k = tog.getAttribute("data-toggle");
@@ -1044,6 +1098,9 @@ document.addEventListener("keydown", (e) => {
 document.addEventListener("keydown", (e) => {
   if(e.target && e.target.id === "searchBox" && e.key === "Enter"){
     e.preventDefault(); doSearch();
+  }
+  if(e.target && e.target.id === "askBox" && e.key === "Enter"){
+    e.preventDefault(); doAsk();
   }
 });
 
